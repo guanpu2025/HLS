@@ -1,0 +1,10 @@
+{
+  "task_id": "ex01_fir11",
+  "top": "fir11",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "fir11.h",
+  "testbench": "fir11_tb.cpp",
+  "extra_files": [],
+  "reference": "reference/fir11.cpp"
+}

@@ -1,0 +1,10 @@
+{
+  "task_id": "ex03_matmul",
+  "top": "matmul",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "matmul.h",
+  "testbench": "matmul_tb.cpp",
+  "extra_files": [],
+  "reference": "reference/matmul.cpp"
+}

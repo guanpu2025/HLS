@@ -1,0 +1,10 @@
+{
+  "task_id": "ex02_histogram",
+  "top": "histogram",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "histogram.h",
+  "testbench": "histogram_tb.cpp",
+  "extra_files": [],
+  "reference": "reference/histogram.cpp"
+}

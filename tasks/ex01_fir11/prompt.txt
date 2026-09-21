@@ -1,0 +1,36 @@
+Kernel Description:
+The `fir11` kernel implements an 11-tap finite impulse response filter over a
+fixed-point input sequence. The filter computes each output sample as the
+weighted sum of the current input sample and the ten preceding ones, using the
+coefficient array supplied by the header.
+
+The filter is defined by the equation $y[n] = \sum_{k=0}^{10} FIR\_COEF[k] \cdot
+x[n-k]$, evaluated for every $n$ in $0 \le n < 64$. Input samples with a
+negative index are treated as zero, so the sequence is zero-padded at the front
+rather than wrapped around; this is a linear convolution, not a circular one.
+
+Accumulation is performed in the wider `acc_t` type to avoid overflow, and the
+result is truncated back to `data_t` when written to the output array.
+
+---
+
+Top-Level Function: `fir11`
+
+Complete Function Signature of the Top-Level Function:
+`void fir11(const data_t x[N_SAMPLES], data_t y[N_SAMPLES]);`
+
+Inputs:
+- `x`: an array of `N_SAMPLES` input samples, where `N_SAMPLES` is 64. Each
+  element is a `data_t` value.
+
+Outputs:
+- `y`: an array of `N_SAMPLES` filtered samples, of the same length and type as
+  the input.
+
+Important Data Structures and Data Types:
+- `data_t`: an integer type defined as `int32_t`, used for the input and output
+  samples.
+- `acc_t`: an integer type defined as `int64_t`, used for the intermediate
+  accumulation.
+- `FIR_COEF`: a constant array of `N_TAPS` coefficients declared in the header,
+  where `N_TAPS` is 11. It is already provided; do not redefine it.

@@ -1,0 +1,34 @@
+Kernel Description:
+The `histogram` kernel computes the intensity histogram of an 8-bit grayscale
+image. Each pixel of the input image contributes one count to the bin that
+corresponds to its value, so the histogram records how many pixels carry each of
+the 256 possible intensities.
+
+The computation is defined by $hist[v] = |\{i : in[i] = v\}|$ for every $v$ in
+$0 \le v < 256$. The kernel must clear the output array itself and must not
+assume that the caller has already zeroed it. Every pixel is counted, so the sum
+over all bins equals the number of pixels.
+
+Note that the read-modify-write on the histogram array forms a loop-carried
+dependency. Applying `PIPELINE II=1` to the innermost loop directly may cause
+the tool to report a dependency conflict. Functional correctness takes priority
+over throughput here.
+
+---
+
+Top-Level Function: `histogram`
+
+Complete Function Signature of the Top-Level Function:
+`void histogram(const pix_t in[N_PIX], hist_t hist[N_BINS]);`
+
+Inputs:
+- `in`: an array of `N_PIX` pixels, where `N_PIX` is 1024. Each element is a
+  `pix_t` value in the range 0 to 255.
+
+Outputs:
+- `hist`: an array of `N_BINS` counts, where `N_BINS` is 256. Element `v` holds
+  the number of input pixels whose value equals `v`.
+
+Important Data Structures and Data Types:
+- `pix_t`: an integer type defined as `uint8_t`, used for the pixel values.
+- `hist_t`: an integer type defined as `uint32_t`, used for the bin counts.

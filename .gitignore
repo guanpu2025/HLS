@@ -1,0 +1,33 @@
+# local environment, never commit
+selftest/env.sh
+example/.env
+
+# self-test artefacts
+selftest/out/
+
+# Vitis / Vivado
+*.log
+*.jou
+*.str
+.Xil/
+hls/
+vitis-comp.json
+*.zip
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# editors
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# model weights -- do not put these in git
+models/
+*.safetensors
+*.gguf
+*.bin

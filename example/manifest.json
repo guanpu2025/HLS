@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "track": "hls",
+  "model": {
+    "name": "Qwen/Qwen3-8B",
+    "source": "https://huggingface.co/Qwen/Qwen3-8B",
+    "revision": "REPLACE_WITH_COMMIT_SHA",
+    "quantization": "none",
+    "measured_vram_gb": 0.0,
+    "finetuned": false,
+    "finetune_weights_url": null
+  },
+  "context": {
+    "max_model_len": 32768,
+    "max_output_tokens": 4096,
+    "rope_scaling": null
+  },
+  "serving": {
+    "backend": "vllm",
+    "version": "REPLACE",
+    "start_command": "./serve/vllm.sh",
+    "port": 8000
+  },
+  "endpoints": {
+    "solve": "./run.sh",
+    "baseline": "./run_baseline.sh",
+    "http_port": 7860
+  },
+  "agent": {
+    "max_rounds": 3,
+    "tools": [
+      "csynth"
+    ],
+    "skills": [
+      "hls-top-interface-contract"
+    ]
+  }
+}

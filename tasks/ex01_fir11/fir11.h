@@ -1,0 +1,18 @@
+#ifndef FIR11_H
+#define FIR11_H
+
+#include <stdint.h>
+
+#define N_SAMPLES 64
+#define N_TAPS 11
+
+typedef int32_t data_t;
+typedef int64_t acc_t;
+
+static const data_t FIR_COEF[N_TAPS] = {
+    -3, 7, -15, 34, 92, 128, 92, 34, -15, 7, -3
+};
+
+void fir11(const data_t x[N_SAMPLES], data_t y[N_SAMPLES]);
+
+#endif  // FIR11_H

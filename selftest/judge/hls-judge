@@ -1,0 +1,406 @@
+#!/usr/bin/env python3
+"""
+hls-judge -- HLS 单题分级判定器（Vitis Unified 版）
+
+对 (dut.cpp, kernel 目录) 给出 L1 / L2 / L3 / L4 分级结果，接口与输出与
+RTL 侧的 tools/veval-vivado/veval-judge 对齐，便于 remote-eval/judge.py 统一调度。
+
+判定口径见《RTL/HLS 本地智能体设计赛道》2.4：
+
+  L1  可解析   Vitis HLS 前端接受待测源码
+  L2  可编译   待测源码与参考测试台一起编译出 csim 可执行文件
+  L3  可运行   执行该可执行文件并通过全部测试用例
+  L4  可综合   csynth_design 产出 RTL 且无 ERROR
+
+工具调用一律走 `vitis-run --mode hls --tcl`。**不使用 `vitis_hls`** ——
+2025.1 / 2025.2 / 2026.1 中都不存在这个可执行文件，`Vitis/scripts/vitis_hls`
+是一个只含 hls.tcl 的目录（《评测执行手册》待办 15）。调用范式取自已实测可用的
+tools/hlseval_part_probe.sh。
+
+本文件为赛事方原创，数据集与测试台格式来自 sharc-lab/HLS-Eval。
+"""
+
+import argparse
+import glob
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+DEFAULT_PART = "xczu3eg-sbva484-1-e"
+DEFAULT_CLOCK_NS = 5.0
+
+# 测试台里 L3 的通过标记来自两处，取决于 kernel 属于哪一类：
+#   有金标文件（polybench）  测试台恒 return 0，靠 stdout 与金标比对
+#   无金标文件（其余）        测试台自检，靠退出码
+GOLDEN_NAMES = ("tb_data_hls.txt", "tb_data.txt")
+
+NUM_RE = re.compile(r"[-+]?(?:\d+\.\d*(?:[eE][-+]?\d+)?|\.\d+(?:[eE][-+]?\d+)?"
+                    r"|\d+(?:[eE][-+]?\d+)?)")
+
+# 授权失败必须与「选手做错」「题目缺陷」区分开。2026.1 起 vitis-run 也要签出
+# seat，而拿不到时的报错极具误导性 —— 实测第二条会把授权问题说成器件不受支持：
+#
+#   ERROR: Vivado Design Suite cannot be launched because a valid license
+#          was not found.
+#   ERROR: [HLS 200-1023] Part 'xczu3eg-sbva484-1-e' is not supported.
+#          It is either unknown, not installed or does not have an
+#          appropriate license.
+#
+# 不识别的话 csim.exe 不生成，会落进下面的 FIXTURE_ERROR 分支，
+# 变成「赛事方题目有问题」，方向完全错。字样为 2026.1 实测采集，非推断。
+LICENSE_RE = re.compile(
+    r"valid license was not found"
+    r"|could not obtain the necessary license"
+    r"|unable to get licensing information"
+    r"|license checkout failure"
+    r"|does not have an appropriate license",
+    re.I)
+
+# 判定级别形如 L0…L4；LICENSE_ERROR / FIXTURE_ERROR 等不是分级结果。
+# 用 fullmatch 而非 startswith("L")，否则 LICENSE_ERROR 会被 finish() 覆盖。
+LEVEL_VERDICT_RE = re.compile(r"L\d+$")
+
+
+def run(cmd, cwd, log_fh, timeout, tag, header=True):
+    """在 cwd 中执行 cmd，输出追加进 log_fh。返回 (rc, timed_out, 秒)。
+
+    独立进程组启动、超时整组杀 —— vitis-run 会派生 clang、csim.exe 等子进程，
+    只杀直接子进程会留孤儿。与 veval-judge 的做法一致。
+
+    header=False 用于需要捕获**纯 stdout** 的场合（跑 csim.exe 时）。命令行里
+    含有路径，路径里的数字会被金标比对的数值正则当成输出数据，把比对搞乱。
+    """
+    if header:
+        log_fh.write(f"\n===== [{tag}] {' '.join(map(str, cmd))} =====\n")
+        log_fh.flush()
+    t0 = time.time()
+    try:
+        p = subprocess.Popen(cmd, cwd=cwd, stdout=log_fh,
+                             stderr=subprocess.STDOUT, start_new_session=True)
+    except FileNotFoundError:
+        log_fh.write(f"[{tag}] 可执行文件不存在：{cmd[0]}\n")
+        return 127, False, 0.0
+    try:
+        rc = p.wait(timeout=timeout)
+        return rc, False, time.time() - t0
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(p.pid), 9)
+        except ProcessLookupError:
+            pass
+        p.wait()
+        log_fh.write(f"\n[{tag}] 超时 {timeout}s，已杀进程组\n")
+        return -9, True, time.time() - t0
+
+
+def stage_log(text, tag):
+    """截取 judge.log 里某一阶段的片段。csynth 与 csim_setup 共用一个日志文件，
+    整体扫描会把前一阶段的字样算进后一阶段。"""
+    m = re.search(rf"^===== \[{re.escape(tag)}\].*?$(.*?)(?=^===== \[|\Z)",
+                  text, re.M | re.S)
+    return m.group(1) if m else ""
+
+
+def read_top(kernel_dir):
+    p = os.path.join(kernel_dir, "top.txt")
+    if not os.path.isfile(p):
+        return None
+    return open(p).read().strip()
+
+
+def find_golden(work):
+    for n in GOLDEN_NAMES:
+        p = os.path.join(work, n)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def compare_golden(stdout_text, golden_path, rel_tol, abs_tol):
+    """按数值比对，不做逐字节 diff —— 输出是浮点，格式差异不该判失败。
+
+    返回 (是否通过, 不匹配个数, 说明)。
+    """
+    got = [float(x) for x in NUM_RE.findall(stdout_text)]
+    exp = [float(x) for x in NUM_RE.findall(open(golden_path).read())]
+    if not exp:
+        return False, None, "金标文件里没有可解析的数值"
+    if len(got) != len(exp):
+        return False, abs(len(got) - len(exp)), \
+               f"数值个数不符：产出 {len(got)}，金标 {len(exp)}"
+    bad = 0
+    for a, b in zip(got, exp):
+        if abs(a - b) > max(abs_tol, rel_tol * abs(b)):
+            bad += 1
+    return bad == 0, bad, "" if bad == 0 else f"{bad}/{len(exp)} 个数值超出容差"
+
+
+def prepare(work, dut, kernel_dir, top):
+    """搭工作目录。返回 (kernel 源文件名, 测试台文件名 或 None)。
+
+    DUT 必须改名成原 kernel 源文件的名字 —— 测试台 #include 的是原 header，
+    而 header 与源文件成对，改名会破坏包含关系。
+    """
+    os.makedirs(work, exist_ok=True)
+
+    tbs = sorted(glob.glob(os.path.join(kernel_dir, "*_tb.cpp")))
+    tb_name = os.path.basename(tbs[0]) if tbs else None
+
+    # 原 kernel 源文件 = 目录下非 _tb 的那个 .cpp
+    srcs = [os.path.basename(f) for f in sorted(glob.glob(os.path.join(kernel_dir, "*.cpp")))
+            if not f.endswith("_tb.cpp")]
+    src_name = srcs[0] if srcs else "kernel.cpp"
+
+    # 头文件、测试台、辅助数据（machsuite 的 *.data 用相对路径 open，
+    # 所以必须拷进工作目录且 csim.exe 的 cwd 要落在这里）
+    for pat in ("*.h", "*.hpp", "*_tb.cpp", "*.data", "tb_data*.txt"):
+        for f in glob.glob(os.path.join(kernel_dir, pat)):
+            shutil.copy2(f, work)
+
+    shutil.copy2(dut, os.path.join(work, src_name))
+    return src_name, tb_name
+
+
+def write_tcl(work, name, src, tb, top, part, clock_ns, commands):
+    tcl = os.path.join(work, name)
+    with open(tcl, "w") as f:
+        f.write("open_project proj\n")
+        f.write(f"add_files -cflags {{-I. -std=c++14}} {src}\n")
+        if tb:
+            f.write(f"add_files -tb -cflags {{-I. -std=c++14}} {tb}\n")
+        f.write(f"set_top {top}\n")
+        f.write("open_solution sol -flow_target vivado\n")
+        f.write(f"set_part {part}\n")
+        f.write(f"create_clock -period {clock_ns} -name clk_default\n")
+        for c in commands:
+            f.write(c + "\n")
+        f.write("exit\n")
+    return os.path.basename(tcl)
+
+
+def judge(args):
+    kernel_dir = os.path.abspath(args.kernel_dir)
+    work = os.path.abspath(args.workdir)
+    if args.clean and os.path.isdir(work):
+        shutil.rmtree(work)
+    os.makedirs(work, exist_ok=True)
+
+    result = {
+        "kernel": os.path.basename(kernel_dir.rstrip("/")),
+        "kernel_dir": kernel_dir,
+        "dut": os.path.abspath(args.dut),
+        "part": args.part,
+        "clock_ns": args.clock_ns,
+        "level": 0, "verdict": "L0",
+        "stages": {},
+        "csim_rc": None,
+        "golden_compared": False,
+        "golden_mismatch": None,
+        "note": "",
+    }
+
+    top = read_top(kernel_dir)
+    if not top:
+        result["verdict"] = "NO_TOP"
+        result["level"] = None
+        result["note"] = "kernel 目录下没有 top.txt，无法判定"
+        return result
+    result["top"] = top
+
+    src, tb = prepare(work, args.dut, kernel_dir, top)
+    log_path = os.path.join(work, "judge.log")
+    result["log"] = log_path
+
+    if tb is None:
+        # chstone 里有 12 个 kernel 没有测试台，L3 无从判起。
+        # 上层（题集挑选）应当避开这些，判定器如实报告，不假装能判。
+        result["verdict"] = "NO_TB"
+        result["level"] = None
+        result["note"] = "kernel 目录下没有 *_tb.cpp，L3 无法判定"
+        return result
+
+    with open(log_path, "w") as log:
+        # ---------------- L1 / L2：csim_design -setup ----------------
+        # -setup 只构建 csim.exe 不运行，这样我们能自己控制运行、
+        # 拿到干净的 stdout 与退出码。
+        t = write_tcl(work, "csim.tcl", src, tb, top, args.part, args.clock_ns,
+                      ["csim_design -setup"])
+        rc, to, dt = run(["vitis-run", "--mode", "hls", "--tcl", t],
+                         work, log, args.timeout_csim_setup, "csim_setup")
+        result["stages"]["csim_setup"] = {"rc": rc, "sec": round(dt, 2), "timeout": to}
+
+        text = open(log_path, errors="ignore").read()
+        exe = os.path.join(work, "proj", "sol", "csim", "build", "csim.exe")
+
+        # 授权失败优先判断：否则 csim.exe 不生成，会落进下面的 FIXTURE_ERROR，
+        # 把环境问题误报成题目缺陷。
+        if LICENSE_RE.search(stage_log(text, "csim_setup")):
+            return license_failed(result, log_path, "csim_design -setup")
+
+        if not os.path.isfile(exe):
+            # 区分「待测源码本身不可解析」与「固定装置的问题」：
+            # 看错误行是否指向待测源文件。
+            dut_err = re.search(rf"^ERROR.*{re.escape(src)}", text, re.M | re.I)
+            if dut_err:
+                result["note"] = dut_err.group(0)[:200]
+                return finish(result)                      # L0 不可解析
+            if re.search(rf"Compiling .*{re.escape(src)}", text):
+                # 待测源码编译过了，卡在测试台或链接
+                result["level"] = 1
+                result["note"] = "待测源码可解析，但未能与测试台编译出 csim.exe"
+                return finish(result)                      # L1
+            result["verdict"] = "FIXTURE_ERROR"
+            result["level"] = None
+            m = re.search(r"^ERROR.*", text, re.M)
+            result["note"] = (m.group(0)[:200] if m else "csim.exe 未生成，原因不明")
+            return result
+
+        result["level"] = 2                                # L2 可编译
+        if args.level < 3:
+            return finish(result)
+
+        # ---------------- L3：跑 csim.exe ----------------
+        # cwd 必须是工作目录 —— machsuite 的测试台用相对路径 open("input.data")
+        out_path = os.path.join(work, "csim_stdout.txt")
+        # header=False：这个文件要拿去和金标逐数值比对，不能混入任何命令行文本
+        with open(out_path, "w") as out:
+            rc3, to3, dt3 = run([exe], work, out, args.timeout_csim_run,
+                                "csim_run", header=False)
+        result["stages"]["csim_run"] = {"rc": rc3, "sec": round(dt3, 2), "timeout": to3}
+        result["csim_rc"] = rc3
+        log.write(f"\n===== [csim_run] rc={rc3} timeout={to3} =====\n")
+
+        if to3:
+            result["note"] = "csim 运行超时"
+            return finish(result)
+        if rc3 != 0:
+            # 自检型测试台（rosetta / machsuite）靠退出码报告功能错误
+            result["note"] = f"测试台返回非零退出码 {rc3}"
+            return finish(result)
+
+        golden = find_golden(work)
+        if golden:
+            ok, bad, why = compare_golden(open(out_path, errors="ignore").read(),
+                                          golden, args.rel_tol, args.abs_tol)
+            result["golden_compared"] = True
+            result["golden_mismatch"] = bad
+            log.write(f"[csim_run] 金标比对 {os.path.basename(golden)}："
+                      f"{'通过' if ok else why}\n")
+            if not ok:
+                result["note"] = why
+                return finish(result)
+
+        result["level"] = 3                                # L3 可运行
+        if args.level < 4:
+            return finish(result)
+
+        # ---------------- L4：csynth ----------------
+        t = write_tcl(work, "csynth.tcl", src, tb, top, args.part, args.clock_ns,
+                      ["csynth_design"])
+        rc4, to4, dt4 = run(["vitis-run", "--mode", "hls", "--tcl", t],
+                            work, log, args.timeout_csynth, "csynth")
+        rpt = os.path.join(work, "proj", "sol", "syn", "report", f"{top}_csynth.rpt")
+        result["stages"]["csynth"] = {"rc": rc4, "sec": round(dt4, 2),
+                                      "timeout": to4, "report": os.path.isfile(rpt)}
+        if to4:
+            # 综合超时按 L3 计并标注，不按 L4 失败处理 —— 超时更多反映题目规模
+            # 而非方案质量。与 RTL 侧 L3 超时的处理一致（执行手册 步骤 4）。
+            result["synth_timeout"] = True
+            result["note"] = "csynth 超时，按 L3 计"
+            return finish(result)
+        # L3 已经成立，但 L4 没判成 —— 报成 L3 会低估。
+        if LICENSE_RE.search(
+                stage_log(open(log_path, errors="ignore").read(), "csynth")):
+            return license_failed(result, log_path, "csynth_design")
+        if os.path.isfile(rpt):
+            result["level"] = 4
+            result.update(parse_csynth(rpt))
+        else:
+            m = re.search(r"^ERROR.*", open(log_path, errors="ignore").read(), re.M)
+            result["note"] = (m.group(0)[:200] if m else "csynth 未产出报告")
+
+    return finish(result)
+
+
+def parse_csynth(rpt):
+    """从 csynth 报告里取资源占用。解析方式沿用 tools/hlseval_part_probe.sh。"""
+    out = {}
+    try:
+        text = open(rpt, errors="ignore").read()
+    except OSError:
+        return out
+    m = re.search(r"^\|Total\s+\|(.+)$", text, re.M)
+    if m:
+        vals = [v.strip() for v in m.group(1).strip().strip("|").split("|")]
+        for k, v in zip(("BRAM_18K", "DSP", "FF", "LUT", "URAM"), vals):
+            out[k] = v
+    return out
+
+
+def finish(result):
+    if not LEVEL_VERDICT_RE.fullmatch(result["verdict"]) or result["level"] is None:
+        return result
+    result["verdict"] = f"L{result['level']}"
+    return result
+
+
+def license_failed(result, log_path, stage):
+    """把授权失败标成基础设施错误，而不是分级结果。"""
+    result["verdict"] = "LICENSE_ERROR"
+    result["level"] = None
+    result["note"] = f"{stage} 未能签出授权，本次判定无效"
+    result["log"] = log_path
+    return result
+
+
+def main():
+    p = argparse.ArgumentParser(description="HLS 单题分级判定器（Vitis Unified 版）")
+    p.add_argument("--dut", required=True, help="待测源码 .cpp")
+    p.add_argument("--kernel-dir", required=True,
+                   help="题目目录，含 top.txt / *.h / *_tb.cpp / 金标或辅助数据")
+    p.add_argument("--workdir", required=True,
+                   help="独立工作目录。并发运行时必须逐样本隔离，且应落在本地盘")
+    p.add_argument("--level", type=int, default=4, choices=(1, 2, 3, 4),
+                   help="判定到哪一级，默认 4")
+    p.add_argument("--part", default=DEFAULT_PART)
+    p.add_argument("--clock-ns", type=float, default=DEFAULT_CLOCK_NS)
+    p.add_argument("--rel-tol", type=float, default=1e-6,
+                   help="金标比对的相对容差")
+    p.add_argument("--abs-tol", type=float, default=1e-9,
+                   help="金标比对的绝对容差")
+    p.add_argument("--timeout-csim-setup", type=int, default=600)
+    p.add_argument("--timeout-csim-run", type=int, default=300)
+    p.add_argument("--timeout-csynth", type=int, default=1800)
+    p.add_argument("--json", help="判定结果写入该 JSON 文件")
+    p.add_argument("--clean", action="store_true", help="先清空 workdir")
+    p.add_argument("-q", "--quiet", action="store_true")
+    args = p.parse_args()
+
+    result = judge(args)
+
+    if args.json:
+        d = os.path.dirname(os.path.abspath(args.json))
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(args.json, "w") as f:
+            json.dump(result, f, indent=2, ensure_ascii=False)
+
+    if not args.quiet:
+        extra = ""
+        if result.get("golden_compared"):
+            extra = f" golden_mismatch={result.get('golden_mismatch')}"
+        elif result.get("csim_rc") is not None:
+            extra = f" csim_rc={result['csim_rc']}"
+        note = f"  {result['note']}" if result.get("note") else ""
+        print(f"{result['verdict']}{extra}  log={result.get('log', '-')}{note}")
+
+    lv = result.get("level")
+    sys.exit(0 if (lv is not None and lv >= args.level) else 1)
+
+
+if __name__ == "__main__":
+    main()

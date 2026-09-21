@@ -1,0 +1,38 @@
+Kernel Description:
+The `matmul` kernel computes the product of two 16x16 integer matrices. Each
+element of the output matrix is the inner product of one row of the first
+operand and one column of the second.
+
+The computation is defined by $c[i][j] = \sum_{k=0}^{15} a[i][k] \cdot b[k][j]$.
+The operands are stored in row-major order.
+
+The input elements are 16-bit, while the accumulation and the output are 32-bit;
+intermediate results must not be truncated to 16 bits at any point. All 256
+elements of the output matrix are written by the kernel, which must not assume
+that they start at zero.
+
+The matrix dimensions are given by macros declared in the header. Use those
+macros rather than literal numbers, and do not redefine them.
+
+---
+
+Top-Level Function: `matmul`
+
+Complete Function Signature of the Top-Level Function:
+`void matmul(const data_t a[DIM_M][DIM_K], const data_t b[DIM_K][DIM_N], acc_t c[DIM_M][DIM_N]);`
+
+Inputs:
+- `a`: a `DIM_M` by `DIM_K` matrix of `data_t` elements, where both dimensions
+  are 16. The matrix is stored in row-major order.
+- `b`: a `DIM_K` by `DIM_N` matrix of `data_t` elements, where both dimensions
+  are 16. The matrix is stored in row-major order.
+
+Outputs:
+- `c`: a `DIM_M` by `DIM_N` matrix of `acc_t` elements holding the product.
+
+Important Data Structures and Data Types:
+- `data_t`: an integer type defined as `int16_t`, used for the input elements.
+- `acc_t`: an integer type defined as `int32_t`, used for the accumulation and
+  the output elements.
+- `DIM_M`, `DIM_K`, `DIM_N`: integer constants, all equal to 16, declared in the
+  header.

@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""
+hls-batch -- HLS 判定的批量驱动，对应 RTL 侧的 tools/veval-vivado/veval-batch
+
+三种模式：
+
+  positive   dut = kernel 自带的参考实现。全部应当到 L4 —— 这是判定器的验收，
+             也是标定容差的依据。
+  negative   dut = 参考实现被注入一处算子错误（+ → -、+= → -= 等）。
+             应当在 L3 失配 —— 用来抓「假通过」。
+  dir        dut 来自指定目录，文件名与 kernel 目录名一致。判真实生成结果。
+
+用法：
+  hls-batch --dataset <hls_eval_data> --mode positive --outdir /tmp/pos --jobs 16
+  hls-batch --dataset <...> --suites polybench,machsuite --mode positive ...
+  hls-batch --dataset <...> --mode dir --dut-dir ./samples --outdir /tmp/run
+"""
+
+import argparse
+import concurrent.futures as cf
+import csv
+import glob
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+HLS_JUDGE = os.path.join(HERE, "hls-judge")
+
+# Vivado 的工程与中间文件必须落在本地盘：csim/csynth 会产生大量小文件。
+TMP_ROOT = os.environ.get("EDA_TMP") or os.environ.get("TRACK_TMP") or "/tmp/eda"
+
+
+def kernel_dirs(dataset, suites, limit):
+    """列出可判定的 kernel。跳过没有 top.txt 或没有测试台的。"""
+    out, skipped = [], []
+    pats = suites or ["*"]
+    for s in pats:
+        for d in sorted(glob.glob(os.path.join(dataset, s, "*"))):
+            if not os.path.isdir(d):
+                continue
+            name = os.path.relpath(d, dataset)
+            if not os.path.isfile(os.path.join(d, "top.txt")):
+                skipped.append((name, "无 top.txt"))
+                continue
+            if not glob.glob(os.path.join(d, "*_tb.cpp")):
+                # chstone 里有 12 个 kernel 没有测试台，L3 判不了。
+                # 如实跳过并报数，不静默丢弃。
+                skipped.append((name, "无测试台"))
+                continue
+            out.append((name, d))
+    if limit:
+        out = out[:limit]
+    return out, skipped
+
+
+def make_dut(kernel_dir, mode, dut_dir, work):
+    """按模式产出待测源码，返回路径。"""
+    srcs = [f for f in sorted(glob.glob(os.path.join(kernel_dir, "*.cpp")))
+            if not f.endswith("_tb.cpp")]
+    if not srcs:
+        raise RuntimeError("kernel 目录下没有非测试台的 .cpp")
+    ref = srcs[0]
+
+    if mode == "positive":
+        return ref
+
+    if mode == "negative":
+        # 注入一处算子错误：功能变错，语法仍然正确。
+        # 按优先级试多种模式 —— 不同 kernel 的写法差别很大，
+        # 只认 ` + ` 会漏掉大量用 `+=` 的（如 polybench 的 2mm/3mm）。
+        text = open(ref, errors="ignore").read()
+        MUTATIONS = [
+            (r"(?<![+\-=<>!])\s\+\s(?![+=])", " - "),   # a + b   → a - b
+            (r"\+=", "-="),                              # a += b  → a -= b
+            (r"(?<![*/])\s\*\s(?![*=])", " + "),         # a * b   → a + b
+            (r"(?<![+\-=<>!])\s-\s(?![-=])", " + "),     # a - b   → a + b
+        ]
+        # 只在计算语句里注入，避开 for/while 的循环头 —— 改循环边界经常
+        # 是行为中性的（实测 polybench/correlation 的 `j = i + 1` 改成
+        # `i - 1` 后输出完全不变），那样负控就变成了钝工具，分不清
+        # 「判定器漏判」和「变异本身没效果」。
+        lines = text.splitlines(keepends=True)
+        broken, n = text, 0
+        for pat, rep in MUTATIONS:
+            for i, ln in enumerate(lines):
+                st = ln.lstrip()
+                if st.startswith(("for", "while", "//", "#")):
+                    continue
+                new, k = re.subn(pat, rep, ln, count=1)
+                if k:
+                    broken = "".join(lines[:i] + [new] + lines[i + 1:])
+                    n = 1
+                    break
+            if n:
+                break
+        if n == 0:
+            raise RuntimeError("找不到可注入的算子，此 kernel 不适合负控")
+        p = os.path.join(work, os.path.basename(ref))
+        os.makedirs(work, exist_ok=True)
+        with open(p, "w") as f:
+            f.write(broken)
+        return p
+
+    # mode == dir：按 kernel 目录名找同名产物
+    base = os.path.basename(kernel_dir)
+    for cand in (f"{base}.cpp", "solution.cpp", os.path.basename(ref)):
+        p = os.path.join(dut_dir, base, cand)
+        if os.path.isfile(p):
+            return p
+        p = os.path.join(dut_dir, f"{base}.cpp")
+        if os.path.isfile(p):
+            return p
+    raise RuntimeError(f"在 {dut_dir} 里找不到 {base} 的产物")
+
+
+def judge_one(name, kdir, args):
+    safe = name.replace("/", "__")
+    work = os.path.join(TMP_ROOT, f"hlsbatch-{safe}")
+    # 暂存目录必须在 work 之外：hls-judge --clean 第一件事就是清空 work，
+    # 放里面的话待测源码会在判定开始前就被删掉。
+    prep = os.path.join(TMP_ROOT, f"hlsbatch-{safe}-dut")
+    out_json = os.path.join(args.outdir, "json", f"{safe}.json")
+    try:
+        dut = make_dut(kdir, args.mode, args.dut_dir, prep)
+    except Exception as e:
+        return {"kernel": name, "verdict": "SKIP", "level": None, "note": str(e)}
+
+    cmd = [sys.executable, HLS_JUDGE,
+           "--dut", dut, "--kernel-dir", kdir, "--workdir", work,
+           "--level", str(args.level), "--part", args.part,
+           "--clock-ns", str(args.clock_ns),
+           "--rel-tol", str(args.rel_tol), "--abs-tol", str(args.abs_tol),
+           "--timeout-csynth", str(args.timeout_csynth),
+           "--json", out_json, "--clean", "--quiet"]
+    try:
+        subprocess.run(cmd, capture_output=True, text=True,
+                       timeout=args.timeout_csynth + 1200)
+    except subprocess.TimeoutExpired:
+        return {"kernel": name, "verdict": "BATCH_TIMEOUT", "level": None, "note": ""}
+    finally:
+        shutil.rmtree(work, ignore_errors=True)   # 不清理会把节点磁盘写满
+        shutil.rmtree(prep, ignore_errors=True)
+
+    if os.path.isfile(out_json):
+        try:
+            d = json.load(open(out_json))
+            d["kernel"] = name
+            return d
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"kernel": name, "verdict": "JUDGE_ERROR", "level": None, "note": ""}
+
+
+def main():
+    p = argparse.ArgumentParser(description="HLS 批量判定驱动")
+    p.add_argument("--dataset", required=True, help="hls_eval_data 目录")
+    p.add_argument("--mode", required=True, choices=("positive", "negative", "dir"))
+    p.add_argument("--dut-dir", help="--mode dir 时的产物来源目录")
+    p.add_argument("--suites", help="逗号分隔，如 polybench,chstone,machsuite,rosetta")
+    p.add_argument("--outdir", required=True)
+    p.add_argument("--jobs", type=int, default=8)
+    p.add_argument("--level", type=int, default=4, choices=(1, 2, 3, 4))
+    p.add_argument("--part", default="xczu3eg-sbva484-1-e")
+    p.add_argument("--clock-ns", type=float, default=5.0)
+    p.add_argument("--rel-tol", type=float, default=1e-6)
+    p.add_argument("--abs-tol", type=float, default=1e-9)
+    p.add_argument("--timeout-csynth", type=int, default=1800)
+    p.add_argument("--limit", type=int, help="只跑前 N 个，用于冒烟")
+    args = p.parse_args()
+
+    if not os.path.isfile(HLS_JUDGE):
+        sys.exit(f"找不到判定器：{HLS_JUDGE}")
+    if args.mode == "dir" and not args.dut_dir:
+        sys.exit("--mode dir 需要 --dut-dir")
+    if not shutil.which("vitis-run"):
+        sys.exit("PATH 中没有 vitis-run，先 source Vitis 的环境")
+
+    suites = args.suites.split(",") if args.suites else None
+    tasks, skipped = kernel_dirs(args.dataset, suites, args.limit)
+    os.makedirs(os.path.join(args.outdir, "json"), exist_ok=True)
+    os.makedirs(TMP_ROOT, exist_ok=True)
+
+    print(f"共 {len(tasks)} 个判定任务，并发 {args.jobs}，判到 L{args.level}，"
+          f"器件 {args.part}")
+    if skipped:
+        print(f"跳过 {len(skipped)} 个：", end="")
+        for r in sorted({r for _, r in skipped}):
+            print(f" {r}×{sum(1 for _, x in skipped if x == r)}", end="")
+        print()
+
+    results = []
+    with cf.ThreadPoolExecutor(max_workers=args.jobs) as pool:
+        futs = {pool.submit(judge_one, n, d, args): n for n, d in tasks}
+        for i, f in enumerate(cf.as_completed(futs), 1):
+            r = f.result()
+            results.append(r)
+            print(f"[{i:3}/{len(tasks)}] {r['kernel']:42} {r.get('verdict', '?'):8} "
+                  f"{r.get('note', '')[:50]}")
+
+    results.sort(key=lambda r: r["kernel"])
+    with open(os.path.join(args.outdir, "results.json"), "w") as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
+    cols = ["kernel", "verdict", "level", "csim_rc", "golden_compared",
+            "golden_mismatch", "note"]
+    with open(os.path.join(args.outdir, "summary.csv"), "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(results)
+
+    print("\n" + "=" * 62)
+    n = len(results)
+    if args.mode == "positive":
+        ok = [r for r in results if r.get("level") == 4]
+        print(f"正控：{len(ok)}/{n} 到 L4")
+        for r in results:
+            if r.get("level") != 4:
+                print(f"  未到 L4  {r['kernel']:40} {r.get('verdict')}  "
+                      f"{r.get('note', '')[:60]}")
+    elif args.mode == "negative":
+        # 只有真的判出了级别、且级别 < 3，才算「抓住」。
+        # SKIP（无法注入变异）与各类 ERROR 不是抓住，混进来会掩盖判定器的问题。
+        real = [r for r in results if isinstance(r.get("level"), int)]
+        noise = [r for r in results if not isinstance(r.get("level"), int)]
+        caught = [r for r in real if r["level"] < 3]
+        print(f"负控：{len(caught)}/{len(real)} 如期在 L3 前失败"
+              f"（另有 {len(noise)} 个未产生有效判定，不计入）")
+        for r in real:
+            if r["level"] >= 3:
+                print(f"  ★ 可疑（假通过） {r['kernel']:36} {r.get('verdict')}")
+        for r in noise:
+            print(f"  未判定 {r['kernel']:40} {r.get('verdict')}  "
+                  f"{r.get('note', '')[:50]}")
+    dist = {}
+    for r in results:
+        dist[r.get("verdict", "?")] = dist.get(r.get("verdict", "?"), 0) + 1
+    print("分布：" + "  ".join(f"{k}={v}" for k, v in sorted(dist.items())))
+    print(f"\n结果：{args.outdir}/summary.csv, {args.outdir}/results.json")
+
+
+if __name__ == "__main__":
+    main()
