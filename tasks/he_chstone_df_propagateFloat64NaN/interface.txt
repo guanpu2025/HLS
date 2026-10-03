@@ -1,0 +1,9 @@
+// header: propagateFloat64NaN.h
+// 头文件 propagateFloat64NaN.h 已提供，直接 #include，不要重复定义其中的类型、宏与常量数组。
+
+typedef int flag;
+typedef int int8;
+typedef unsigned long long int bits64;
+typedef unsigned long long float64;
+
+float64 propagateFloat64NaN(float64 a, float64 b);

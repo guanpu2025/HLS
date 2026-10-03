@@ -1,0 +1,16 @@
+{
+  "task_id": "he_pp4fpga_parallel_merge_sort",
+  "top": "merge_sort_parallel",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "merge_sort_parallel.h",
+  "testbench": "merge_sort_parallel_tb.cpp",
+  "extra_files": [],
+  "reference": "reference/merge_sort_parallel.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "pp4fpga",
+    "kernel": "parallel_merge_sort",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/pp4fpga/parallel_merge_sort"
+  }
+}

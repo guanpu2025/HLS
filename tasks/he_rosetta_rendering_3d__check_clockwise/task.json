@@ -1,0 +1,16 @@
+{
+  "task_id": "he_rosetta_rendering_3d__check_clockwise",
+  "top": "check_clockwise",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "check_clockwise.h",
+  "testbench": "check_clockwise_tb.cpp",
+  "extra_files": [],
+  "reference": "reference/check_clockwise.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "rosetta",
+    "kernel": "rendering_3d__check_clockwise",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/rosetta/rendering_3d__check_clockwise"
+  }
+}

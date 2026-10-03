@@ -1,0 +1,18 @@
+{
+  "task_id": "he_polybench_fixed_durbin",
+  "top": "kernel_durbin",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "durbin.h",
+  "testbench": "durbin_tb.cpp",
+  "extra_files": [
+    "tb_data.txt"
+  ],
+  "reference": "reference/durbin.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "hls_polybench__fixed__small",
+    "kernel": "durbin",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/hls_polybench__fixed__small/durbin"
+  }
+}

@@ -1,0 +1,14 @@
+// header: durbin.h
+// 头文件 durbin.h 已提供，直接 #include，不要重复定义其中的类型、宏与常量数组。
+
+#pragma once
+#include "ap_fixed.h"
+#include "hls_math.h"
+
+typedef ap_fixed<32,16> t_ap_fixed;
+
+extern "C" {
+void kernel_durbin(
+		   t_ap_fixed r[ 120 + 0],
+		   t_ap_fixed y[ 120 + 0]);
+}

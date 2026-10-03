@@ -1,0 +1,16 @@
+{
+  "task_id": "he_chstone_df_float64_is_signaling_nan",
+  "top": "float64_is_signaling_nan",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "float64_is_signaling_nan.h",
+  "testbench": "float64_is_signaling_nan_tb.cpp",
+  "extra_files": [],
+  "reference": "reference/float64_is_signaling_nan.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "chstone",
+    "kernel": "df_float64_is_signaling_nan",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/chstone/df_float64_is_signaling_nan"
+  }
+}

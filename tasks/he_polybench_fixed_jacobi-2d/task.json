@@ -1,0 +1,18 @@
+{
+  "task_id": "he_polybench_fixed_jacobi-2d",
+  "top": "kernel_jacobi_2d",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "jacobi-2d.h",
+  "testbench": "jacobi-2d_tb.cpp",
+  "extra_files": [
+    "tb_data.txt"
+  ],
+  "reference": "reference/jacobi-2d.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "hls_polybench__fixed__small",
+    "kernel": "jacobi-2d",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/hls_polybench__fixed__small/jacobi-2d"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "task_id": "he_polybench_fixed_seidel-2d",
+  "top": "kernel_seidel_2d",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "seidel-2d.h",
+  "testbench": "seidel-2d_tb.cpp",
+  "extra_files": [
+    "tb_data.txt"
+  ],
+  "reference": "reference/seidel-2d.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "hls_polybench__fixed__small",
+    "kernel": "seidel-2d",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/hls_polybench__fixed__small/seidel-2d"
+  }
+}

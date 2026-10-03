@@ -1,0 +1,16 @@
+{
+  "task_id": "he_rosetta_optical_flow__outer_product",
+  "top": "outer_product",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "outer_product.h",
+  "testbench": "outer_product_tb.cpp",
+  "extra_files": [],
+  "reference": "reference/outer_product.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "rosetta",
+    "kernel": "optical_flow__outer_product",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/rosetta/optical_flow__outer_product"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "task_id": "he_gnnbuilder_gather_node_neighbors",
+  "top": "gather_node_neighbors",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "gather_node_neighbors.h",
+  "testbench": "gather_node_neighbors_tb.cpp",
+  "extra_files": [],
+  "reference": "reference/gather_node_neighbors.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "gnnbuilder",
+    "kernel": "gather_node_neighbors",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/gnnbuilder/gather_node_neighbors"
+  }
+}

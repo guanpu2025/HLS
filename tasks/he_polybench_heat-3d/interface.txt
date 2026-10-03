@@ -1,0 +1,7 @@
+// header: heat-3d.h
+// 头文件 heat-3d.h 已提供，直接 #include，不要重复定义其中的类型、宏与常量数组。
+
+#pragma once
+#include <cmath>
+
+void kernel_heat_3d(double A[10][10][10], double B[10][10][10]);

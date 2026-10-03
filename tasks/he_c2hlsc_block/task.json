@@ -1,0 +1,16 @@
+{
+  "task_id": "he_c2hlsc_block",
+  "top": "BlockFrequency",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "block.h",
+  "testbench": "block_tb.cpp",
+  "extra_files": [],
+  "reference": "reference/block.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "c2hlsc",
+    "kernel": "block",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/c2hlsc/block"
+  }
+}

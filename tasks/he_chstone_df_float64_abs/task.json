@@ -1,0 +1,16 @@
+{
+  "task_id": "he_chstone_df_float64_abs",
+  "top": "float64_abs",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "float64_abs.h",
+  "testbench": "float64_abs_tb.cpp",
+  "extra_files": [],
+  "reference": "reference/float64_abs.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "chstone",
+    "kernel": "df_float64_abs",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/chstone/df_float64_abs"
+  }
+}

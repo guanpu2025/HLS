@@ -1,0 +1,18 @@
+{
+  "task_id": "he_polybench_fixed_atax",
+  "top": "kernel_atax",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "atax.h",
+  "testbench": "atax_tb.cpp",
+  "extra_files": [
+    "tb_data.txt"
+  ],
+  "reference": "reference/atax.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "hls_polybench__fixed__small",
+    "kernel": "atax",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/hls_polybench__fixed__small/atax"
+  }
+}

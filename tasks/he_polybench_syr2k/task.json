@@ -1,0 +1,20 @@
+{
+  "task_id": "he_polybench_syr2k",
+  "top": "kernel_syr2k",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "syr2k.h",
+  "testbench": "syr2k_tb.cpp",
+  "extra_files": [
+    "tb_data.txt",
+    "tb_data_hls.txt",
+    "tb_data_hls_error.json"
+  ],
+  "reference": "reference/syr2k.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "polybench",
+    "kernel": "syr2k",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/polybench/syr2k"
+  }
+}

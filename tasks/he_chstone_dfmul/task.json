@@ -1,0 +1,16 @@
+{
+  "task_id": "he_chstone_dfmul",
+  "top": "float64_mul",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "dfmul.h",
+  "testbench": "dfmul_tb.cpp",
+  "extra_files": [],
+  "reference": "reference/dfmul.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "chstone",
+    "kernel": "dfmul",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/chstone/dfmul"
+  }
+}

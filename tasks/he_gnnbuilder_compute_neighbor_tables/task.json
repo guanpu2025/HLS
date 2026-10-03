@@ -1,0 +1,16 @@
+{
+  "task_id": "he_gnnbuilder_compute_neighbor_tables",
+  "top": "compute_neighbor_tables",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "compute_neighbor_tables.h",
+  "testbench": "compute_neighbor_tables_tb.cpp",
+  "extra_files": [],
+  "reference": "reference/compute_neighbor_tables.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "gnnbuilder",
+    "kernel": "compute_neighbor_tables",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/gnnbuilder/compute_neighbor_tables"
+  }
+}

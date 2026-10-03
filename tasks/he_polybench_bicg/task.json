@@ -1,0 +1,20 @@
+{
+  "task_id": "he_polybench_bicg",
+  "top": "kernel_bicg",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "bicg.h",
+  "testbench": "bicg_tb.cpp",
+  "extra_files": [
+    "tb_data.txt",
+    "tb_data_hls.txt",
+    "tb_data_hls_error.json"
+  ],
+  "reference": "reference/bicg.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "polybench",
+    "kernel": "bicg",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/polybench/bicg"
+  }
+}

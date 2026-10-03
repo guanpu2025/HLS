@@ -1,0 +1,19 @@
+{
+  "task_id": "he_machsuite_fft_strided",
+  "top": "fft",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "fft_strided.h",
+  "testbench": "fft_strided_tb.cpp",
+  "extra_files": [
+    "check.data",
+    "input.data"
+  ],
+  "reference": "reference/fft_strided.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "machsuite",
+    "kernel": "fft_strided",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/machsuite/fft_strided"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "task_id": "he_chstone_df_countLeadingZeros64",
+  "top": "countLeadingZeros64",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "countLeadingZeros64.h",
+  "testbench": "countLeadingZeros64_tb.cpp",
+  "extra_files": [],
+  "reference": "reference/countLeadingZeros64.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "chstone",
+    "kernel": "df_countLeadingZeros64",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/chstone/df_countLeadingZeros64"
+  }
+}

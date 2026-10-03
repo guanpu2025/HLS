@@ -1,0 +1,12 @@
+// header: gemm.h
+// 头文件 gemm.h 已提供，直接 #include，不要重复定义其中的类型、宏与常量数组。
+
+#pragma once
+#include <cmath>
+
+void kernel_gemm(
+    double alpha,
+    double beta,
+    double C[20][25],
+    double A[20][30],
+    double B[30][25]);

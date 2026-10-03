@@ -1,0 +1,16 @@
+{
+  "task_id": "he_rosetta_spam_filter__computeGradient",
+  "top": "computeGradient",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "computeGradient.h",
+  "testbench": "computeGradient_tb.cpp",
+  "extra_files": [],
+  "reference": "reference/computeGradient.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "rosetta",
+    "kernel": "spam_filter__computeGradient",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/rosetta/spam_filter__computeGradient"
+  }
+}

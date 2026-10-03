@@ -1,0 +1,9 @@
+// header: shift64RightJamming.h
+// 头文件 shift64RightJamming.h 已提供，直接 #include，不要重复定义其中的类型、宏与常量数组。
+
+typedef int int8;
+typedef int int16;
+
+typedef unsigned long long int bits64;
+
+void shift64RightJamming(bits64 a, int16 count, bits64 *zPtr);

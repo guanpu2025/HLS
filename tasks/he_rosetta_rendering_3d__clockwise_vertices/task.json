@@ -1,0 +1,16 @@
+{
+  "task_id": "he_rosetta_rendering_3d__clockwise_vertices",
+  "top": "clockwise_vertices",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "clockwise_vertices.h",
+  "testbench": "clockwise_vertices_tb.cpp",
+  "extra_files": [],
+  "reference": "reference/clockwise_vertices.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "rosetta",
+    "kernel": "rendering_3d__clockwise_vertices",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/rosetta/rendering_3d__clockwise_vertices"
+  }
+}

@@ -1,0 +1,16 @@
+// header: fft_strided.h
+// 头文件 fft_strided.h 已提供，直接 #include，不要重复定义其中的类型、宏与常量数组。
+
+#include <stdint.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+
+#define FFT_SIZE 1024
+#define twoPI 6.28318530717959
+
+void fft(
+    double real[FFT_SIZE],
+    double img[FFT_SIZE],
+    double real_twid[FFT_SIZE / 2],
+    double img_twid[FFT_SIZE / 2]);

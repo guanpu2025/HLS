@@ -1,0 +1,16 @@
+{
+  "task_id": "he_gnnbuilder_global_add_pool",
+  "top": "global_add_pool",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "global_add_pool.h",
+  "testbench": "global_add_pool_tb.cpp",
+  "extra_files": [],
+  "reference": "reference/global_add_pool.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "gnnbuilder",
+    "kernel": "global_add_pool",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/gnnbuilder/global_add_pool"
+  }
+}

@@ -1,0 +1,12 @@
+// header: bicg.h
+// 头文件 bicg.h 已提供，直接 #include，不要重复定义其中的类型、宏与常量数组。
+
+#pragma once
+#include <cmath>
+
+void kernel_bicg(
+    double A[42][38],
+    double s[38],
+    double q[42],
+    double p[38],
+    double r[42]);

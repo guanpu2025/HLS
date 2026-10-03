@@ -1,0 +1,16 @@
+{
+  "task_id": "he_chstone_dfsin",
+  "top": "local_sin",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "dfsin.h",
+  "testbench": "dfsin_tb.cpp",
+  "extra_files": [],
+  "reference": "reference/dfsin.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "chstone",
+    "kernel": "dfsin",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/chstone/dfsin"
+  }
+}

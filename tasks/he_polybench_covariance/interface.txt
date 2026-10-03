@@ -1,0 +1,11 @@
+// header: covariance.h
+// 头文件 covariance.h 已提供，直接 #include，不要重复定义其中的类型、宏与常量数组。
+
+#pragma once
+#include <cmath>
+
+void kernel_covariance(
+    double float_n,
+    double data[32][28],
+    double cov[28][28],
+    double mean[28]);

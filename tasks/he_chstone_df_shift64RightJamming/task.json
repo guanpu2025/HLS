@@ -1,0 +1,16 @@
+{
+  "task_id": "he_chstone_df_shift64RightJamming",
+  "top": "shift64RightJamming",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "shift64RightJamming.h",
+  "testbench": "shift64RightJamming_tb.cpp",
+  "extra_files": [],
+  "reference": "reference/shift64RightJamming.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "chstone",
+    "kernel": "df_shift64RightJamming",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/chstone/df_shift64RightJamming"
+  }
+}

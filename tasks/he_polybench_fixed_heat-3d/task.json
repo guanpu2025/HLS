@@ -1,0 +1,18 @@
+{
+  "task_id": "he_polybench_fixed_heat-3d",
+  "top": "kernel_heat_3d",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "heat-3d.h",
+  "testbench": "heat-3d_tb.cpp",
+  "extra_files": [
+    "tb_data.txt"
+  ],
+  "reference": "reference/heat-3d.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "hls_polybench__fixed__small",
+    "kernel": "heat-3d",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/hls_polybench__fixed__small/heat-3d"
+  }
+}

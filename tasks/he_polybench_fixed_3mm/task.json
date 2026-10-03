@@ -1,0 +1,18 @@
+{
+  "task_id": "he_polybench_fixed_3mm",
+  "top": "kernel_3mm",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "3mm.h",
+  "testbench": "3mm_tb.cpp",
+  "extra_files": [
+    "tb_data.txt"
+  ],
+  "reference": "reference/3mm.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "hls_polybench__fixed__small",
+    "kernel": "3mm",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/hls_polybench__fixed__small/3mm"
+  }
+}

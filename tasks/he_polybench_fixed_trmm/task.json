@@ -1,0 +1,18 @@
+{
+  "task_id": "he_polybench_fixed_trmm",
+  "top": "kernel_trmm",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "trmm.h",
+  "testbench": "trmm_tb.cpp",
+  "extra_files": [
+    "tb_data.txt"
+  ],
+  "reference": "reference/trmm.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "hls_polybench__fixed__small",
+    "kernel": "trmm",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/hls_polybench__fixed__small/trmm"
+  }
+}

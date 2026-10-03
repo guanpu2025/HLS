@@ -1,0 +1,18 @@
+{
+  "task_id": "he_polybench_fixed_gesummv",
+  "top": "kernel_gesummv",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "gesummv.h",
+  "testbench": "gesummv_tb.cpp",
+  "extra_files": [
+    "tb_data.txt"
+  ],
+  "reference": "reference/gesummv.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "hls_polybench__fixed__small",
+    "kernel": "gesummv",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/hls_polybench__fixed__small/gesummv"
+  }
+}

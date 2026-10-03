@@ -1,0 +1,16 @@
+{
+  "task_id": "he_rosetta_rendering_3d__pixel_in_triangle",
+  "top": "pixel_in_triangle",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "pixel_in_triangle.h",
+  "testbench": "pixel_in_triangle_tb.cpp",
+  "extra_files": [],
+  "reference": "reference/pixel_in_triangle.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "rosetta",
+    "kernel": "rendering_3d__pixel_in_triangle",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/rosetta/rendering_3d__pixel_in_triangle"
+  }
+}

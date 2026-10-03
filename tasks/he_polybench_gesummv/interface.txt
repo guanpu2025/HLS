@@ -1,0 +1,14 @@
+// header: gesummv.h
+// 头文件 gesummv.h 已提供，直接 #include，不要重复定义其中的类型、宏与常量数组。
+
+#pragma once
+#include <cmath>
+
+void kernel_gesummv(
+    double alpha,
+    double beta,
+    double A[30][30],
+    double B[30][30],
+    double tmp[30],
+    double x[30],
+    double y[30]);

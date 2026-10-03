@@ -1,10 +1,27 @@
-# tasks/ — 示例题目
+# tasks/ — 示例题目 + HLS-Eval 导入题
 
-三道题，格式与评测题集一致，用来确认接口通畅与判定链路可用。
+三道 `ex*` 示例题格式与评测题集一致，用来确认接口通畅与判定链路可用。
+另外已用 `scripts/import_hls_eval.py` 从本地
+[HLS-Eval](https://github.com/sharc-lab/HLS-Eval)（`/data/guanpu/FPGA/hls-eval`）
+导入 **122** 道 `he_*` 题（跳过 `__WIP`），目录布局与示例题相同。
 
-**它们不是自测题集。** 三道题量不出任何有意义的通过率，开发阶段请用
-[HLS-Eval](https://github.com/sharc-lab/HLS-Eval)（101 个 kernel，源自 PolyBench /
-CHStone / MachSuite / Rosetta），并把实测结果写进设计报告。
+**不要对默认 `tasks/` 直接跑完整 `./run_selftest.sh`（agent/baseline）**——题量 ×
+Vitis 判定会非常久。日常建议：
+
+```bash
+# 只跑官方 3 道样题：把 he_* 移走或另建目录后 --tasks 指向它
+# 或只判定参考实现抽查导入是否正确：
+cd ../selftest
+./run_selftest.sh --reference --tasks ../tasks_smoke   # 小子集
+./run_selftest.sh --check                              # 应显示 125 道
+```
+
+重新导入：
+
+```bash
+python3 ../scripts/import_hls_eval.py --clean-he
+# 可选：--suites c2hlsc machsuite
+```
 
 ---
 
@@ -15,6 +32,7 @@ CHStone / MachSuite / Rosetta），并把实测结果写进设计报告。
 | `ex01_fir11`       | `fir11`      | 边界处理（前补零）、累加位宽                 |
 | `ex02_histogram`   | `histogram`  | 循环携带依赖、输出数组须自行清零             |
 | `ex03_matmul`      | `matmul`     | 累加位宽不得截断、输出须全部写入             |
+| `he_<suite>_<ker>` | 见各 `top.txt` | 自 HLS-Eval 导入；`polybench_fixed` 为定点子集 |
 
 每道题的测试台都刻意设了陷阱：`ex02` 把 `hist` 预填成 `0xDEADBEEF`（假设调用方已清零
 的实现会失败），`ex03` 把 `c` 预填成垃圾值且输入幅度足以让 16 位累加溢出。写得马虎但

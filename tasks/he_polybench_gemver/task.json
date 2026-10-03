@@ -1,0 +1,20 @@
+{
+  "task_id": "he_polybench_gemver",
+  "top": "kernel_gemver",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "gemver.h",
+  "testbench": "gemver_tb.cpp",
+  "extra_files": [
+    "tb_data.txt",
+    "tb_data_hls.txt",
+    "tb_data_hls_error.json"
+  ],
+  "reference": "reference/gemver.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "polybench",
+    "kernel": "gemver",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/polybench/gemver"
+  }
+}

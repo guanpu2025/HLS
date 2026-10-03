@@ -1,0 +1,16 @@
+{
+  "task_id": "he_chstone_df_add128",
+  "top": "add128",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "add128.h",
+  "testbench": "add128_tb.cpp",
+  "extra_files": [],
+  "reference": "reference/add128.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "chstone",
+    "kernel": "df_add128",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/chstone/df_add128"
+  }
+}

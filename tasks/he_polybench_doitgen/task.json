@@ -1,0 +1,20 @@
+{
+  "task_id": "he_polybench_doitgen",
+  "top": "kernel_doitgen",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "doitgen.h",
+  "testbench": "doitgen_tb.cpp",
+  "extra_files": [
+    "tb_data.txt",
+    "tb_data_hls.txt",
+    "tb_data_hls_error.json"
+  ],
+  "reference": "reference/doitgen.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "polybench",
+    "kernel": "doitgen",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/polybench/doitgen"
+  }
+}

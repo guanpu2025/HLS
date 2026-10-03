@@ -1,0 +1,6 @@
+// header: float64_neg.h
+// 头文件 float64_neg.h 已提供，直接 #include，不要重复定义其中的类型、宏与常量数组。
+
+typedef unsigned long long float64;
+
+float64 float64_neg(float64 x);

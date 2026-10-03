@@ -1,0 +1,19 @@
+{
+  "task_id": "he_machsuite_md_grid",
+  "top": "md",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "md_grid.h",
+  "testbench": "md_grid_tb.cpp",
+  "extra_files": [
+    "check.data",
+    "input.data"
+  ],
+  "reference": "reference/md_grid.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "machsuite",
+    "kernel": "md_grid",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/machsuite/md_grid"
+  }
+}

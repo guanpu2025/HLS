@@ -1,0 +1,18 @@
+{
+  "task_id": "he_polybench_fixed_symm",
+  "top": "kernel_symm",
+  "part": "xczu3eg-sbva484-1-e",
+  "period_ns": 5,
+  "header": "symm.h",
+  "testbench": "symm_tb.cpp",
+  "extra_files": [
+    "tb_data.txt"
+  ],
+  "reference": "reference/symm.cpp",
+  "source": {
+    "dataset": "HLS-Eval",
+    "suite": "hls_polybench__fixed__small",
+    "kernel": "symm",
+    "path": "/data/guanpu/FPGA/hls-eval/hls_eval_data/hls_polybench__fixed__small/symm"
+  }
+}
