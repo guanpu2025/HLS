@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -185,3 +186,97 @@ def summarize_log(out: str, limit: int = 4000) -> str:
     # Vitis repeats the same diagnostic many times; keep first occurrence only.
     text = "\n".join(dict.fromkeys(ln for ln in lines if ln))
     return text[-limit:] if len(text) > limit else text
+
+
+# Failure classes for the repair loop. These are actions, not a complete HLS
+# taxonomy: each one maps to a different next step. Anything that does not
+# match stays "other" rather than being forced into a class.
+#
+#   interface    header / top signature — patch include and signature only
+#   unsynth      constructs Vitis will reject — remove them
+#   array_type   a typedef array was used as a scalar or struct
+#   pragma       a pragma blew up scheduling or synthesis — drop pragmas first
+#   functional   a self-check ran and disagreed — fix the arithmetic
+#   other        not enough evidence
+_INTERFACE_RE = re.compile(
+    r"file not found|No such file|redefinition of|undefined symbol|"
+    r"Top function not found|multiple definition|"
+    r"HLS 214-157|SIM 211-100",
+    re.I,
+)
+_UNSYNTH_CODE_RE = re.compile(
+    r"\bnew\s+|malloc\s*\(|std::vector|std::string|\brecursive\b",
+)
+_UNSYNTH_LOG_RE = re.compile(
+    r"Unsupported|dynamic memory|non-synthesizable|recursion",
+    re.I,
+)
+_PRAGMA_LOG_RE = re.compile(
+    r"csynth timed out|Lower bound of II|Final II\s*=\s*([0-9]+)",
+    re.I,
+)
+_FUNCTIONAL_RE = re.compile(
+    r"self-check failed|self_check failed|assertion failed|mismatch",
+    re.I,
+)
+# Seen on c2hlsc aes/des/mix_columns/present/sub_bytes: the header typedef is
+# an array (state_t, des_block_t, ...). The model assigned, xored, or took a
+# member of the whole array instead of indexing it.
+_ARRAY_TYPE_RE = re.compile(
+    r"array type .+ is not assignable|"
+    r"array subscript is not an integer|"
+    r"is not a structure or union|"
+    r"invalid operands to binary expression|"
+    r"from incompatible type|"
+    r"cannot initialize a variable of type",
+    re.I,
+)
+
+
+def classify(code: str, log: str = "") -> str:
+    """Classify a failed attempt from the source and a tool log.
+
+    A clean csynth log is not functional success. `functional` is returned
+    only when `log` already describes a self-check disagreement.
+    """
+    text = code or ""
+    excerpt = log or ""
+
+    if _INTERFACE_RE.search(excerpt):
+        return "interface"
+    # Log evidence of "typedef array used as a value" beats a std::vector /
+    # malloc somewhere in the same file. present was mislabeled unsynth.
+    if _ARRAY_TYPE_RE.search(excerpt):
+        return "array_type"
+    if _UNSYNTH_CODE_RE.search(text) or _UNSYNTH_LOG_RE.search(excerpt):
+        return "unsynth"
+    if _FUNCTIONAL_RE.search(excerpt):
+        return "functional"
+
+    ii = _PRAGMA_LOG_RE.search(excerpt)
+    if ii:
+        # "Final II = 1" is the target, not a blow-up. A bare timeout or a
+        # lower-bound warning still counts.
+        if ii.group(1) is None or int(ii.group(1)) > 1 or "timed out" in excerpt.lower():
+            return "pragma"
+    if _outer_pipeline(text):
+        return "pragma"
+    return "other"
+
+
+def _outer_pipeline(code: str) -> bool:
+    """True when a PIPELINE pragma appears before the first loop.
+
+    That placement unrolls the whole nest. The polybench gemm baseline did
+    this and synthesis grew to tens of thousands of instructions.
+    """
+    pragma_at = None
+    first_for = None
+    for i, line in enumerate(code.splitlines()):
+        stripped = line.strip()
+        if pragma_at is None and re.search(r"#pragma\s+HLS\s+PIPELINE", stripped, re.I):
+            pragma_at = i
+        if first_for is None and re.match(r"for\s*\(", stripped):
+            first_for = i
+            break
+    return pragma_at is not None and (first_for is None or pragma_at < first_for)

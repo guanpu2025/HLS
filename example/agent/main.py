@@ -34,7 +34,7 @@ import time
 
 from .llm import LLM, LLMError, extract_code
 from .skills import load_skills, select
-from .tools import HlsToolchain
+from .tools import HlsToolchain, classify
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -132,6 +132,32 @@ def build_task_block(prompt: str, interface: str) -> str:
 # 基线由赛事方的 ../baseline.py 实现，不在此处。
 
 
+def _error_excerpt(log: str, limit: int = 1200) -> str:
+    """Keep the first distinct ERROR lines. Warnings are not repair input."""
+    lines = [ln.strip() for ln in log.splitlines() if "ERROR" in ln or "error:" in ln]
+    if not lines:
+        lines = [ln.strip() for ln in log.splitlines() if ln.strip()][:8]
+    text = "\n".join(dict.fromkeys(lines))
+    return text[:limit]
+
+
+def _clip(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n/* ... truncated for context limit ... */\n"
+
+
+def _repair_hint(kind: str) -> str:
+    """One-line instruction for the class returned by tools.classify."""
+    return {
+        "interface": "失败类别 interface：只改 #include 和顶层函数签名，不要改算法。",
+        "unsynth": "失败类别 unsynth：去掉动态分配、std::vector、std::string 和递归，保留算法。",
+        "array_type": "失败类别 array_type：头文件里的类型可能是数组。按下标读写元素，不要把整个数组当作整数、结构体或可直接赋值的值。",
+        "pragma": "失败类别 pragma：先删除 #pragma HLS，不要把 PIPELINE 放在最外层循环之前。",
+        "functional": "失败类别 functional：保持接口不变，只改计算结果。",
+    }.get(kind, "失败类别 other：只改日志里第一条错误对应的部分，不要整份重写。")
+
+
 def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str) -> str:
     hls = HlsToolchain()
     trace.write(
@@ -152,6 +178,7 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str) -
     started = time.time()
     best = ""
     last_log = ""
+    last_kind = ""
 
     for rnd in range(1, MAX_ROUNDS + 1):
         remaining = DEADLINE_S - (time.time() - started) - RESERVE_S
@@ -162,19 +189,33 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str) -
         messages = [{"role": "system", "content": system}]
 
         chosen = select(skills, prompt, last_log) if last_log else []
+        array_skill = [s for s in skills if s.name == "hls-array-typedef"]
+        if last_kind == "array_type":
+            chosen = array_skill + [s for s in chosen if s.name != "hls-array-typedef"]
+        else:
+            chosen = [s for s in chosen if s.name != "hls-array-typedef"]
+        chosen = chosen[:2]
         if chosen:
-            messages.append({
-                "role": "system",
-                "content": "以下技能与当前错误相关，按其中的步骤处理：\n\n"
-                           + "\n\n".join(s.render() for s in chosen),
-            })
+            # One system message only. Qwen's template rejects a second one
+            # with "System message must be at the beginning."
+            messages[0]["content"] += (
+                "\n\n以下技能与当前错误相关，按其中的步骤处理：\n\n"
+                + "\n\n".join(s.render() for s in chosen)
+            )
             trace.write(tool="skills", event="inject", round=rnd,
                         selected=[s.name for s in chosen])
 
-        user = build_task_block(prompt, interface)
         if last_log:
-            user += "\n\n" + repair_tpl.replace("{{LOG}}", last_log) \
-                                       .replace("{{CODE}}", best)
+            # Repair rounds omit the long task statement and clip the previous
+            # kernel. des overflowed the 8192-token context when both were sent.
+            user = (
+                "## 顶层接口（签名不得改动）\n\n```cpp\n" + (interface or "") + "\n```\n\n"
+                + _repair_hint(last_kind) + "\n\n"
+                + repair_tpl.replace("{{LOG}}", _error_excerpt(last_log))
+                            .replace("{{CODE}}", _clip(best, 4000))
+            )
+        else:
+            user = build_task_block(prompt, interface)
 
         messages.append({"role": "user", "content": user})
 
@@ -205,17 +246,19 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str) -
             break
 
         rc, log = hls.csynth(code, top, timeout_s=remaining, headers=headers)
-        trace.write(tool="csynth", round=rnd, rc=rc, excerpt=log[:2000])
+        kind = classify(code, log)
+        trace.write(tool="csynth", round=rnd, rc=rc, failure=kind, excerpt=log[:2000])
 
         if rc == 0:
             trace.write(tool="agent", event="accept", round=rnd)
             return code
-        if rc < 0:
-            # 工具链不可用或超时，无法验证，不再继续重试。
+        if rc < 0 and kind != "pragma":
+            # 工具链不可用，无法验证，不再继续重试。综合超时且判成 pragma 时仍重试。
             trace.write(tool="agent", event="stop", round=rnd,
-                        reason="no verification available")
+                        reason="no verification available", failure=kind)
             return code
 
+        last_kind = kind
         last_log = log
 
     return best
