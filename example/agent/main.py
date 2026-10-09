@@ -147,11 +147,35 @@ def _clip(text: str, limit: int) -> str:
     return text[:limit] + "\n/* ... truncated for context limit ... */\n"
 
 
+# Short skills injected only for the matching failure class. The long
+# hls-top-interface-contract document stays on disk; sending it on a repair
+# round overflows the 8192-token context.
+_SKILL_FOR_KIND = {
+    "array_type": "hls-array-typedef",
+    "interface": "hls-interface-contract",
+    "header": "hls-no-host-headers",
+}
+
+
+def _choose_skills(skills, kind: str, prompt: str, log: str):
+    forced_name = _SKILL_FOR_KIND.get(kind, "")
+    forced = [s for s in skills if s.name == forced_name]
+    chosen = select(skills, prompt, log) if log else []
+    blocked = set(_SKILL_FOR_KIND.values())
+    if forced_name == "hls-interface-contract":
+        blocked.add("hls-top-interface-contract")
+    chosen = forced + [s for s in chosen if s.name not in blocked]
+    if not forced:
+        chosen = [s for s in chosen if s.name not in _SKILL_FOR_KIND.values()]
+    return chosen[:2]
+
+
 def _repair_hint(kind: str) -> str:
     """One-line instruction for the class returned by tools.classify."""
     return {
         "interface": "失败类别 interface：只改 #include 和顶层函数签名，不要改算法。",
         "unsynth": "失败类别 unsynth：去掉动态分配、std::vector、std::string 和递归，保留算法。",
+        "header": "失败类别 header：删掉 stdio、cstdlib、cmath 等主机头文件及其调用，只保留题目头文件。",
         "array_type": "失败类别 array_type：头文件里的类型可能是数组。按下标读写元素，不要把整个数组当作整数、结构体或可直接赋值的值。",
         "pragma": "失败类别 pragma：先删除 #pragma HLS，不要把 PIPELINE 放在最外层循环之前。",
         "functional": "失败类别 functional：保持接口不变，只改计算结果。",
@@ -188,13 +212,7 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str) -
 
         messages = [{"role": "system", "content": system}]
 
-        chosen = select(skills, prompt, last_log) if last_log else []
-        array_skill = [s for s in skills if s.name == "hls-array-typedef"]
-        if last_kind == "array_type":
-            chosen = array_skill + [s for s in chosen if s.name != "hls-array-typedef"]
-        else:
-            chosen = [s for s in chosen if s.name != "hls-array-typedef"]
-        chosen = chosen[:2]
+        chosen = _choose_skills(skills, last_kind, prompt, last_log)
         if chosen:
             # One system message only. Qwen's template rejects a second one
             # with "System message must be at the beginning."

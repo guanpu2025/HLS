@@ -211,6 +211,14 @@ _UNSYNTH_LOG_RE = re.compile(
     r"Unsupported|dynamic memory|non-synthesizable|recursion",
     re.I,
 )
+# Host C library and HLS helper headers. Seen as size_t/FILE from stdio,
+# undeclared sqrt, and ap_decl.h errors after the model includes those headers.
+_HEADER_RE = re.compile(
+    r"struct_FILE\.h|unknown type name 'size_t'|stdio\.h|cstdio|"
+    r"\bmath\.h\b|cmath|undeclared identifier 'sqrt'|undeclared identifier 'printf'|"
+    r"\bFILE\b|ap_decl\.h|unknown type name 'ap_",
+    re.I,
+)
 _PRAGMA_LOG_RE = re.compile(
     r"csynth timed out|Lower bound of II|Final II\s*=\s*([0-9]+)",
     re.I,
@@ -248,6 +256,8 @@ def classify(code: str, log: str = "") -> str:
     # malloc somewhere in the same file. present was mislabeled unsynth.
     if _ARRAY_TYPE_RE.search(excerpt):
         return "array_type"
+    if _HEADER_RE.search(excerpt):
+        return "header"
     if _UNSYNTH_CODE_RE.search(text) or _UNSYNTH_LOG_RE.search(excerpt):
         return "unsynth"
     if _FUNCTIONAL_RE.search(excerpt):
