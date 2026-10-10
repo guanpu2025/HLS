@@ -106,7 +106,8 @@ def split_interface(interface: str) -> dict[str, str]:
     #   make-tasks.py 生成的评测题   `// header: fir11.h`
     #   仓库里的示例题               `// 头文件 fir11.h 已提供，直接 #include`
     if lines[0].lstrip().startswith("//"):
-        m = re.search(r"([A-Za-z_][\w.\-]*\.(?:h|hpp))", lines[0])
+        # 文件名可以以数字开头（2mm.h）。从字母开始匹配会把 2mm.h 截成 mm.h。
+        m = re.search(r"([A-Za-z0-9_][\w.\-]*\.(?:h|hpp))", lines[0])
         if m:
             name, body = m.group(1), lines[1:]
 
@@ -301,7 +302,7 @@ def main(argv: list[str] | None = None) -> int:
         trace.write(tool="agent", event="start", mode="agent",
                     llm=llm.describe(), deadline_s=DEADLINE_S)
 
-        top = args.top or infer_top(interface)
+        top = args.top or infer_top(interface, prompt)
         code = solve_agent(llm, trace, prompt, interface, top)
     except Exception as exc:  # noqa: BLE001 -- never fail loudly, see run.sh
         trace.write(tool="agent", event="error", excerpt=f"{type(exc).__name__}: {exc}"[:500])
@@ -315,11 +316,25 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def infer_top(interface: str) -> str:
-    """Best-effort top function name from the declared signature."""
-    import re
-    m = re.search(r"\b([A-Za-z_]\w*)\s*\([^;{]*\)\s*;", interface or "")
-    return m.group(1) if m else "top"
+_TOP_IN_PROMPT = re.compile(r"Top-Level Function:\s*`([A-Za-z_]\w*)`")
+# 只认带返回类型的函数声明。跳过 #define，避免 STRING_SIZE、getSBoxValue 被当成顶层。
+_PROTO = re.compile(
+    r"^\s*(?:[\w:*&]+\s+)+([A-Za-z_]\w*)\s*\([^;]*\)\s*;\s*$",
+    re.M,
+)
+
+
+def infer_top(interface: str, prompt: str = "") -> str:
+    """Top function name from the prompt, else the first real prototype."""
+    m = _TOP_IN_PROMPT.search(prompt or "")
+    if m:
+        return m.group(1)
+    lines = [
+        ln for ln in (interface or "").splitlines()
+        if not ln.strip().startswith("#")
+    ]
+    names = _PROTO.findall("\n".join(lines))
+    return names[0] if names else "top"
 
 
 if __name__ == "__main__":
