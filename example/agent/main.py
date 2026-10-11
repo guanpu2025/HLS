@@ -33,6 +33,7 @@ import sys
 import time
 
 from .llm import LLM, LLMError, extract_code
+from .selfcheck import self_check
 from .skills import load_skills, select
 from .tools import HlsToolchain, classify
 
@@ -43,6 +44,8 @@ SKILL_DIR = os.path.join(ROOT, "skill")
 
 MAX_ROUNDS = int(os.environ.get("AGENT_MAX_ROUNDS", "3"))
 DEADLINE_S = float(os.environ.get("AGENT_DEADLINE_S", "360"))
+# 综合通过之后才跑。默认关闭，避免改到正在进行的评分。
+SELF_CHECK = os.environ.get("AGENT_SELF_CHECK", "0") == "1"
 # 为写出结果预留的余量。
 RESERVE_S = float(os.environ.get("AGENT_RESERVE_S", "20"))
 
@@ -183,7 +186,8 @@ def _repair_hint(kind: str) -> str:
     }.get(kind, "失败类别 other：只改日志里第一条错误对应的部分，不要整份重写。")
 
 
-def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str) -> str:
+def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str,
+                task_dir: str = "") -> str:
     hls = HlsToolchain()
     trace.write(
         tool="env", vitis_available=hls.available,
@@ -269,6 +273,19 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str) -
         trace.write(tool="csynth", round=rnd, rc=rc, failure=kind, excerpt=log[:2000])
 
         if rc == 0:
+            if SELF_CHECK and task_dir:
+                remaining = DEADLINE_S - (time.time() - started) - RESERVE_S
+                if remaining <= 0:
+                    trace.write(tool="budget", event="stop", round=rnd, reason="deadline")
+                    return code
+                src, slog = self_check(
+                    task_dir, code, top, interface, headers, timeout_s=remaining,
+                )
+                trace.write(tool="selfcheck", round=rnd, rc=src, excerpt=slog[:2000])
+                if src > 0:
+                    last_kind = "functional"
+                    last_log = slog
+                    continue
             trace.write(tool="agent", event="accept", round=rnd)
             return code
         if rc < 0 and kind != "pragma":
@@ -303,7 +320,7 @@ def main(argv: list[str] | None = None) -> int:
                     llm=llm.describe(), deadline_s=DEADLINE_S)
 
         top = args.top or infer_top(interface, prompt)
-        code = solve_agent(llm, trace, prompt, interface, top)
+        code = solve_agent(llm, trace, prompt, interface, top, args.input)
     except Exception as exc:  # noqa: BLE001 -- never fail loudly, see run.sh
         trace.write(tool="agent", event="error", excerpt=f"{type(exc).__name__}: {exc}"[:500])
         print(f"agent: {type(exc).__name__}: {exc}", file=sys.stderr)
