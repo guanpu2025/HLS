@@ -220,9 +220,10 @@ _HEADER_RE = re.compile(
     re.I,
 )
 _PRAGMA_LOG_RE = re.compile(
-    r"csynth timed out|Lower bound of II|Final II\s*=\s*([0-9]+)",
+    r"Lower bound of II|Final II\s*=\s*([0-9]+)",
     re.I,
 )
+_TIMEOUT_RE = re.compile(r"csynth timed out", re.I)
 _FUNCTIONAL_RE = re.compile(
     r"self-check failed|self_check failed|assertion failed|mismatch",
     re.I,
@@ -262,12 +263,16 @@ def classify(code: str, log: str = "") -> str:
         return "unsynth"
     if _FUNCTIONAL_RE.search(excerpt):
         return "functional"
+    # Timeout used to match the pragma pattern, so a 320s csynth was repaired
+    # as a pipeline bug and often left no time for that repair.
+    if _TIMEOUT_RE.search(excerpt):
+        return "timeout"
 
     ii = _PRAGMA_LOG_RE.search(excerpt)
     if ii:
         # "Final II = 1" is the target, not a blow-up. A bare timeout or a
         # lower-bound warning still counts.
-        if ii.group(1) is None or int(ii.group(1)) > 1 or "timed out" in excerpt.lower():
+        if ii.group(1) is None or int(ii.group(1)) > 1:
             return "pragma"
     if _outer_pipeline(text):
         return "pragma"

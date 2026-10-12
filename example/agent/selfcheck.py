@@ -85,6 +85,11 @@ def self_check(
         )
         if compile_log[0] != 0:
             text = compile_log[1]
+            if _driver_fault(text):
+                return -1, (
+                    "self-check skipped: host driver cannot build this interface\n"
+                    + text[-800:]
+                )
             if "dut.cpp" in text:
                 return 1, "self-check failed: solution did not compile on the host\n" + text[-1500:]
             return -1, "self-check skipped: host compile failed\n" + text[-800:]
@@ -96,6 +101,17 @@ def self_check(
         return 1, "self-check failed\n" + run_log[-1500:]
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def _driver_fault(text: str) -> bool:
+    """True when the first error is in the generated driver, not the solution.
+
+    Struct arguments such as aes256_context fail inside check.cpp while being
+    filled. That is not a wrong kernel, so the agent should skip the check.
+    """
+    check = re.search(r"check\.cpp:\d+:\d+: error:", text)
+    dut = re.search(r"dut\.cpp:\d+:\d+: error:", text)
+    return check is not None and (dut is None or check.start() < dut.start())
 
 
 def parse_signature(interface: str, top: str) -> tuple[str, list[Arg]] | None:
@@ -255,14 +271,41 @@ def _driver(top: str, ret: str, args: list[Arg], headers: dict[str, str]) -> str
         "}",
         "static uint32_t lcg_state;",
         "static uint32_t lcg() { lcg_state = lcg_state * 1664525u + 1013904223u; return lcg_state; }",
+        "static int pat_i;",
+        "static const uint64_t kPat64[8] = {",
+        "    0ull, 1ull, ~0ull, 1ull << 63,",
+        "    0x7ff8000000000000ull, 0x7ff0000000000001ull,",
+        "    0x7ff0000000000000ull, 0xfff0000000000000ull};",
+        "static const uint32_t kPat32[8] = {",
+        "    0u, 1u, 0xffffffffu, 0x80000000u,",
+        "    0x7fc00000u, 0x7f800001u, 0x7f800000u, 0xff800000u};",
         "template <typename T>",
         "static void fill_one(T& slot) {",
         "    if constexpr (std::is_floating_point<T>::value) {",
         "        slot = static_cast<T>((static_cast<int>(lcg() % 21) - 10) / 2.0);",
+        "    } else if constexpr (std::is_integral<T>::value && sizeof(T) == 8) {",
+        "        uint64_t bits = kPat64[pat_i % 8];",
+        "        pat_i++;",
+        "        std::memcpy(&slot, &bits, sizeof(bits));",
+        "    } else if constexpr (std::is_integral<T>::value && sizeof(T) == 4) {",
+        "        uint32_t bits = kPat32[pat_i % 8];",
+        "        pat_i++;",
+        "        std::memcpy(&slot, &bits, sizeof(bits));",
         "    } else if constexpr (sizeof(T) == 1) {",
         "        slot = static_cast<T>(lcg() % 16);",
         "    } else {",
         "        slot = static_cast<T>(static_cast<int>(lcg() % 17) - 8);",
+        "    }",
+        "}",
+        "template <typename T>",
+        "static void show_val(const T& v) {",
+        "    if constexpr (std::is_floating_point<T>::value) {",
+        "        std::printf(\"%g\", static_cast<double>(v));",
+        "    } else if constexpr (std::is_integral<T>::value) {",
+        "        using U = std::make_unsigned_t<T>;",
+        "        std::printf(\"0x%llx\", static_cast<unsigned long long>(static_cast<U>(v)));",
+        "    } else {",
+        "        std::printf(\"?\");",
         "    }",
         "}",
         "template <typename T>",
@@ -271,8 +314,10 @@ def _driver(top: str, ret: str, args: list[Arg], headers: dict[str, str]) -> str
         "        double d = std::fabs(static_cast<double>(a) - static_cast<double>(b));",
         "        double s = std::fabs(static_cast<double>(a)) + std::fabs(static_cast<double>(b));",
         "        return d <= 1e-4 || d <= 1e-3 * s;",
-        "    } else {",
+        "    } else if constexpr (std::is_integral<T>::value) {",
         "        return a == b;",
+        "    } else {",
+        "        return false;",
         "    }",
         "}",
     ]
@@ -316,8 +361,9 @@ def _driver(top: str, ret: str, args: list[Arg], headers: dict[str, str]) -> str
             return f"&{arg.name}_{suffix}"
         return f"{arg.name}_{suffix}"
 
-    body = ["int main() {", "    int trials = 2;", "    for (int trial = 0; trial < trials; ++trial) {",
-            "        lcg_state = 0x12345678u + static_cast<uint32_t>(trial) * 97u;"]
+    body = ["int main() {", "    int trials = 8;", "    for (int trial = 0; trial < trials; ++trial) {",
+            "        lcg_state = 0x12345678u + static_cast<uint32_t>(trial) * 97u;",
+            "        pat_i = trial;"]
     for arg in args:
         if arg.const or not arg.dims and not arg.pointer:
             body.append("        " + decl(arg, "in"))
@@ -325,8 +371,32 @@ def _driver(top: str, ret: str, args: list[Arg], headers: dict[str, str]) -> str
         else:
             body.append("        " + decl(arg, "dut"))
             body.append("        " + decl(arg, "ref"))
+            body.append("        " + decl(arg, "in"))
             body.append("        " + fill_stmt(arg, "dut"))
             body.append(f"        std::memcpy(&{arg.name}_ref, &{arg.name}_dut, sizeof({arg.name}_dut));")
+            body.append(f"        std::memcpy(&{arg.name}_in, &{arg.name}_dut, sizeof({arg.name}_dut));")
+
+    def dump_values(indent: str, dut_expr: str, ref_expr: str, failing: Arg | None, sub: str) -> list[str]:
+        """One failure report: inputs, then the two outputs. Kept short for the repair prompt."""
+        lines_out = [f'{indent}std::printf("inputs");']
+        for arg in args:
+            if arg.const or (not arg.dims and not arg.pointer):
+                lines_out.append(
+                    f'{indent}std::printf(" {arg.name}="); show_val({arg.name}_in);'
+                )
+            elif failing is not None and index_dims(arg) == index_dims(failing) and sub:
+                lines_out.append(
+                    f'{indent}std::printf(" {arg.name}{sub}="); show_val({arg.name}_in{sub});'
+                )
+            elif failing is not None and not arg.dims and arg.pointer and not sub:
+                lines_out.append(
+                    f'{indent}std::printf(" {arg.name}="); show_val({arg.name}_in);'
+                )
+        lines_out.append(f'{indent}std::printf("\\n");')
+        lines_out.append(f'{indent}std::printf("dut="); show_val({dut_expr});')
+        lines_out.append(f'{indent}std::printf(" ref="); show_val({ref_expr});')
+        lines_out.append(f'{indent}std::printf("\\n");')
+        return lines_out
 
     dut_args = []
     ref_args = []
@@ -347,6 +417,7 @@ def _driver(top: str, ret: str, args: list[Arg], headers: dict[str, str]) -> str
         body.append(f"        auto ref_ret = {call_ref};")
         body.append("        if (!same(dut_ret, ref_ret)) {")
         body.append('            std::printf("self-check failed: return value mismatch\\n");')
+        body.extend(dump_values("            ", "dut_ret", "ref_ret", None, ""))
         body.append("            return 1;")
         body.append("        }")
 
@@ -358,6 +429,9 @@ def _driver(top: str, ret: str, args: list[Arg], headers: dict[str, str]) -> str
             body.append(
                 f'            std::printf("self-check failed: {arg.name} mismatch\\n");'
             )
+            body.extend(dump_values(
+                "            ", f"{arg.name}_dut", f"{arg.name}_ref", arg, "",
+            ))
             body.append("            return 1;")
             body.append("        }")
             continue
@@ -376,6 +450,9 @@ def _driver(top: str, ret: str, args: list[Arg], headers: dict[str, str]) -> str
         body.append(
             f'                std::printf("self-check failed: {arg.name}{sub} mismatch\\n");'
         )
+        body.extend(dump_values(
+            "                ", f"{arg.name}_dut{sub}", f"{arg.name}_ref{sub}", arg, sub,
+        ))
         body.append("                return 1;")
         body.append("            }")
         body.append("        " + " ".join(close))

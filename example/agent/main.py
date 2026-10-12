@@ -183,11 +183,34 @@ def _repair_hint(kind: str) -> str:
         "array_type": "失败类别 array_type：头文件里的类型可能是数组。按下标读写元素，不要把整个数组当作整数、结构体或可直接赋值的值。",
         "pragma": "失败类别 pragma：先删除 #pragma HLS，不要把 PIPELINE 放在最外层循环之前。",
         "functional": "失败类别 functional：保持接口不变，只改计算结果。",
+        "timeout": "失败类别 timeout：综合超时。缩小循环界或减少展开，不要靠加 PIPELINE 来修。",
     }.get(kind, "失败类别 other：只改日志里第一条错误对应的部分，不要整份重写。")
 
 
+def _round_csynth_budget(remaining: float, rnd: int) -> float:
+    """Share the time still left with later rounds.
+
+    The csynth call used to receive the whole leftover deadline, so one 320s
+    timeout ended the task before a repair round existed.
+    """
+    later = MAX_ROUNDS - rnd
+    if later <= 0 or remaining <= 0:
+        return remaining
+    return max(1.0, remaining / (later + 1))
+
+
+def _save_round(output_dir: str, rnd: int, name: str, text: str) -> str:
+    """Keep each attempt on disk. The trace only stores a short excerpt."""
+    folder = os.path.join(output_dir, "rounds")
+    os.makedirs(folder, exist_ok=True)
+    rel = os.path.join("rounds", f"r{rnd}.{name}")
+    with open(os.path.join(output_dir, rel), "w", encoding="utf-8") as fh:
+        fh.write(text or "")
+    return rel
+
+
 def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str,
-                task_dir: str = "") -> str:
+                task_dir: str = "", output_dir: str = "") -> str:
     hls = HlsToolchain()
     trace.write(
         tool="env", vitis_available=hls.available,
@@ -262,15 +285,21 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str,
             continue
 
         best = code
+        if output_dir:
+            _save_round(output_dir, rnd, "cpp", code)
 
         remaining = DEADLINE_S - (time.time() - started) - RESERVE_S
         if remaining <= 0:
             trace.write(tool="budget", event="stop", round=rnd, reason="deadline")
             break
 
-        rc, log = hls.csynth(code, top, timeout_s=remaining, headers=headers)
+        rc, log = hls.csynth(
+            code, top, timeout_s=_round_csynth_budget(remaining, rnd), headers=headers,
+        )
         kind = classify(code, log)
-        trace.write(tool="csynth", round=rnd, rc=rc, failure=kind, excerpt=log[:2000])
+        csynth_path = _save_round(output_dir, rnd, "csynth.txt", log) if output_dir else ""
+        trace.write(tool="csynth", round=rnd, rc=rc, failure=kind,
+                    excerpt=log[:2000], log_path=csynth_path or None)
 
         if rc == 0:
             if SELF_CHECK and task_dir:
@@ -281,15 +310,18 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str,
                 src, slog = self_check(
                     task_dir, code, top, interface, headers, timeout_s=remaining,
                 )
-                trace.write(tool="selfcheck", round=rnd, rc=src, excerpt=slog[:2000])
+                check_path = _save_round(output_dir, rnd, "selfcheck.txt", slog) if output_dir else ""
+                trace.write(tool="selfcheck", round=rnd, rc=src,
+                            excerpt=slog[:2000], log_path=check_path or None)
                 if src > 0:
                     last_kind = "functional"
                     last_log = slog
                     continue
             trace.write(tool="agent", event="accept", round=rnd)
             return code
-        if rc < 0 and kind != "pragma":
-            # 工具链不可用，无法验证，不再继续重试。综合超时且判成 pragma 时仍重试。
+        if rc < 0 and kind != "timeout":
+            # 工具链不可用，无法验证，不再继续重试。综合超时仍重试，前提是上面把
+            # 本轮时限封顶，后面的轮次还剩时间。
             trace.write(tool="agent", event="stop", round=rnd,
                         reason="no verification available", failure=kind)
             return code
@@ -320,7 +352,7 @@ def main(argv: list[str] | None = None) -> int:
                     llm=llm.describe(), deadline_s=DEADLINE_S)
 
         top = args.top or infer_top(interface, prompt)
-        code = solve_agent(llm, trace, prompt, interface, top, args.input)
+        code = solve_agent(llm, trace, prompt, interface, top, args.input, args.output)
     except Exception as exc:  # noqa: BLE001 -- never fail loudly, see run.sh
         trace.write(tool="agent", event="error", excerpt=f"{type(exc).__name__}: {exc}"[:500])
         print(f"agent: {type(exc).__name__}: {exc}", file=sys.stderr)
