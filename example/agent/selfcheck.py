@@ -2,8 +2,10 @@
 
 The official ``*_tb.cpp`` is never opened. The reference source is compiled
 beside the solution and is not returned to the model; a mismatch report only
-contains values. Tasks without a reference, or kernels the host compiler
-cannot build (``ap_fixed`` and similar), are skipped rather than failed.
+contains values. Tasks without a reference are skipped. ``hls_stream`` is
+skipped. ``ap_fixed`` is compiled with the Vitis headers when ``v++`` is on
+``PATH``. A host compile that fails in the driver, not in the solution, is
+also skipped rather than failed.
 
 Enable it in the agent with ``AGENT_SELF_CHECK=1``. The default is off.
 """
@@ -26,7 +28,7 @@ _TYPEDEF_ARRAY = re.compile(
     r"typedef\s+(.+?)\s+([A-Za-z_]\w*)\s*((?:\s*\[[^\]]+\])+)\s*;",
     re.S,
 )
-_HLS_ONLY = re.compile(r"ap_int\.h|ap_fixed\.h|hls_stream|hls_math\.h|ap_fixed\s*<")
+_HLS_ONLY = re.compile(r"hls_stream")
 
 
 @dataclass
@@ -54,7 +56,7 @@ def self_check(
     if timeout_s <= 1:
         return -1, "self-check skipped: no time left"
     if _HLS_ONLY.search(interface or ""):
-        return -1, "self-check skipped: host compiler cannot build HLS-only types"
+        return -1, "self-check skipped: host compiler cannot build hls_stream"
     ref = _reference_path(task_dir)
     if ref is None:
         return -1, "self-check skipped: no local reference"
@@ -77,9 +79,13 @@ def self_check(
         with open(os.path.join(work, "check.cpp"), "w", encoding="utf-8") as fh:
             fh.write(driver)
         binary = os.path.join(work, "check")
+        cmd = ["g++", "-std=c++17", "-O1", "-I", work, "-I", task_dir]
+        inc = _vitis_include()
+        if inc:
+            cmd.extend(["-I", inc])
+        cmd.extend(["-o", binary, os.path.join(work, "check.cpp")])
         compile_log = _run(
-            ["g++", "-std=c++17", "-O1", "-I", work, "-I", task_dir,
-             "-o", binary, os.path.join(work, "check.cpp")],
+            cmd,
             timeout_s=min(timeout_s, 60.0),
             cwd=work,
         )
@@ -96,11 +102,47 @@ def self_check(
         run_rc, run_log = _run([binary], timeout_s=min(timeout_s, 30.0), cwd=task_dir)
         if run_rc == 0:
             return 0, "self-check passed"
+        if run_rc == _RUN_TIMEOUT or "SELF_CHECK_REF_OK" not in run_log:
+            return -1, "self-check skipped: reference crashed or the run timed out\n" + _visible_log(run_log)[-800:]
         if run_rc < 0:
-            return 1, "self-check failed: run timed out or crashed\n" + run_log[-800:]
-        return 1, "self-check failed\n" + run_log[-1500:]
+            return 1, _solution_crash(run_rc, run_log)
+        return 1, "self-check failed\n" + _visible_log(run_log)[-1500:]
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def _visible_log(log: str) -> str:
+    """Drop the reference-finished marker. It is only for crash classification."""
+    lines = [ln for ln in log.splitlines() if ln.strip() != "SELF_CHECK_REF_OK"]
+    return "\n".join(lines)
+
+
+def _solution_crash(rc: int, log: str) -> str:
+    """The reference finished and the solution then died on a signal."""
+    if rc == -11:
+        why = "段错误。检查数组下标是否越界。"
+    elif rc == -8:
+        why = "浮点异常。"
+    else:
+        why = f"信号 {-rc}。"
+    return (
+        "self-check failed: solution crashed after the reference accepted this input\n"
+        + why + "\n" + _visible_log(log)[-800:]
+    )
+
+
+def _vitis_include() -> str | None:
+    """Directory that contains ``ap_fixed.h``, if this machine has Vitis."""
+    env = os.environ.get("HLS_INCLUDE", "").strip()
+    if env and os.path.isfile(os.path.join(env, "ap_fixed.h")):
+        return env
+    vpp = shutil.which("v++")
+    if not vpp:
+        return None
+    inc = os.path.abspath(os.path.join(os.path.dirname(vpp), os.pardir, "include"))
+    if os.path.isfile(os.path.join(inc, "ap_fixed.h")):
+        return inc
+    return None
 
 
 def _driver_fault(text: str) -> bool:
@@ -297,10 +339,16 @@ def _driver(top: str, ret: str, args: list[Arg], headers: dict[str, str]) -> str
         "        slot = static_cast<T>(static_cast<int>(lcg() % 17) - 8);",
         "    }",
         "}",
+        "template <typename T, typename = void>",
+        "struct has_to_double : std::false_type {};",
+        "template <typename T>",
+        "struct has_to_double<T, std::void_t<decltype(std::declval<const T&>().to_double())>> : std::true_type {};",
         "template <typename T>",
         "static void show_val(const T& v) {",
         "    if constexpr (std::is_floating_point<T>::value) {",
         "        std::printf(\"%g\", static_cast<double>(v));",
+        "    } else if constexpr (has_to_double<T>::value) {",
+        "        std::printf(\"%g\", v.to_double());",
         "    } else if constexpr (std::is_integral<T>::value) {",
         "        using U = std::make_unsigned_t<T>;",
         "        std::printf(\"0x%llx\", static_cast<unsigned long long>(static_cast<U>(v)));",
@@ -314,7 +362,14 @@ def _driver(top: str, ret: str, args: list[Arg], headers: dict[str, str]) -> str
         "        double d = std::fabs(static_cast<double>(a) - static_cast<double>(b));",
         "        double s = std::fabs(static_cast<double>(a)) + std::fabs(static_cast<double>(b));",
         "        return d <= 1e-4 || d <= 1e-3 * s;",
-        "    } else if constexpr (std::is_integral<T>::value) {",
+        "    } else if constexpr (has_to_double<T>::value) {",
+        "        double av = a.to_double();",
+        "        double bv = b.to_double();",
+        "        if (std::isnan(av) && std::isnan(bv)) return true;",
+        "        double d = std::fabs(av - bv);",
+        "        double s = std::fabs(av) + std::fabs(bv);",
+        "        return d <= 1e-4 || d <= 1e-3 * s;",
+        "    } else if constexpr (std::is_integral<T>::value || std::is_class<T>::value) {",
         "        return a == b;",
         "    } else {",
         "        return false;",
@@ -361,7 +416,10 @@ def _driver(top: str, ret: str, args: list[Arg], headers: dict[str, str]) -> str
             return f"&{arg.name}_{suffix}"
         return f"{arg.name}_{suffix}"
 
-    body = ["int main() {", "    int trials = 8;", "    for (int trial = 0; trial < trials; ++trial) {",
+    blob = "\n".join(headers.values())
+    fixed = "ap_fixed" in blob or "ap_int" in blob or "ap_ufixed" in blob
+    trials = 2 if fixed else 8
+    body = ["int main() {", f"    int trials = {trials};", "    for (int trial = 0; trial < trials; ++trial) {",
             "        lcg_state = 0x12345678u + static_cast<uint32_t>(trial) * 97u;",
             "        pat_i = trial;"]
     for arg in args:
@@ -376,24 +434,26 @@ def _driver(top: str, ret: str, args: list[Arg], headers: dict[str, str]) -> str
             body.append(f"        std::memcpy(&{arg.name}_ref, &{arg.name}_dut, sizeof({arg.name}_dut));")
             body.append(f"        std::memcpy(&{arg.name}_in, &{arg.name}_dut, sizeof({arg.name}_dut));")
 
-    def dump_values(indent: str, dut_expr: str, ref_expr: str, failing: Arg | None, sub: str) -> list[str]:
-        """One failure report: inputs, then the two outputs. Kept short for the repair prompt."""
+    def dump_values(indent: str, dut_expr: str, ref_expr: str, failing: Arg | None, sub: str, label: str) -> list[str]:
+        """One failure report: inputs, then `name dut=... ref=...`."""
         lines_out = [f'{indent}std::printf("inputs");']
         for arg in args:
             if arg.const or (not arg.dims and not arg.pointer):
                 lines_out.append(
                     f'{indent}std::printf(" {arg.name}="); show_val({arg.name}_in);'
                 )
-            elif failing is not None and index_dims(arg) == index_dims(failing) and sub:
+            elif (
+                failing is not None and sub and arg.dims
+                and index_dims(arg) == index_dims(failing)
+            ):
+                # In-place arrays: the snapshot is the real input. Pointer
+                # outputs such as z0Ptr are only written, so their pre-filled
+                # bytes are not inputs and must not be printed.
                 lines_out.append(
                     f'{indent}std::printf(" {arg.name}{sub}="); show_val({arg.name}_in{sub});'
                 )
-            elif failing is not None and not arg.dims and arg.pointer and not sub:
-                lines_out.append(
-                    f'{indent}std::printf(" {arg.name}="); show_val({arg.name}_in);'
-                )
         lines_out.append(f'{indent}std::printf("\\n");')
-        lines_out.append(f'{indent}std::printf("dut="); show_val({dut_expr});')
+        lines_out.append(f'{indent}std::printf("{label} dut="); show_val({dut_expr});')
         lines_out.append(f'{indent}std::printf(" ref="); show_val({ref_expr});')
         lines_out.append(f'{indent}std::printf("\\n");')
         return lines_out
@@ -410,14 +470,18 @@ def _driver(top: str, ret: str, args: list[Arg], headers: dict[str, str]) -> str
     call_dut = f"dutns::{top}_dut({', '.join(dut_args)})"
     call_ref = f"refns::{top}_ref({', '.join(ref_args)})"
     if ret == "void":
-        body.append(f"        {call_dut};")
         body.append(f"        {call_ref};")
+        body.append('        std::printf("SELF_CHECK_REF_OK\\n");')
+        body.append("        std::fflush(stdout);")
+        body.append(f"        {call_dut};")
     else:
-        body.append(f"        auto dut_ret = {call_dut};")
         body.append(f"        auto ref_ret = {call_ref};")
+        body.append('        std::printf("SELF_CHECK_REF_OK\\n");')
+        body.append("        std::fflush(stdout);")
+        body.append(f"        auto dut_ret = {call_dut};")
         body.append("        if (!same(dut_ret, ref_ret)) {")
         body.append('            std::printf("self-check failed: return value mismatch\\n");')
-        body.extend(dump_values("            ", "dut_ret", "ref_ret", None, ""))
+        body.extend(dump_values("            ", "dut_ret", "ref_ret", None, "", "返回值"))
         body.append("            return 1;")
         body.append("        }")
 
@@ -430,7 +494,7 @@ def _driver(top: str, ret: str, args: list[Arg], headers: dict[str, str]) -> str
                 f'            std::printf("self-check failed: {arg.name} mismatch\\n");'
             )
             body.extend(dump_values(
-                "            ", f"{arg.name}_dut", f"{arg.name}_ref", arg, "",
+                "            ", f"{arg.name}_dut", f"{arg.name}_ref", arg, "", arg.name,
             ))
             body.append("            return 1;")
             body.append("        }")
@@ -452,6 +516,7 @@ def _driver(top: str, ret: str, args: list[Arg], headers: dict[str, str]) -> str
         )
         body.extend(dump_values(
             "                ", f"{arg.name}_dut{sub}", f"{arg.name}_ref{sub}", arg, sub,
+            f"{arg.name}{sub}",
         ))
         body.append("                return 1;")
         body.append("            }")
@@ -462,6 +527,9 @@ def _driver(top: str, ret: str, args: list[Arg], headers: dict[str, str]) -> str
     return "\n".join(lines + body) + "\n"
 
 
+_RUN_TIMEOUT = -1000
+
+
 def _run(cmd: list[str], timeout_s: float, cwd: str) -> tuple[int, str]:
     try:
         proc = subprocess.run(
@@ -470,9 +538,9 @@ def _run(cmd: list[str], timeout_s: float, cwd: str) -> tuple[int, str]:
         )
     except subprocess.TimeoutExpired as exc:
         out = (exc.stdout or "") + (exc.stderr or "")
-        return -1, out
+        return _RUN_TIMEOUT, out
     except OSError as exc:
-        return -1, str(exc)
+        return _RUN_TIMEOUT, str(exc)
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
 
 

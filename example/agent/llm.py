@@ -62,16 +62,16 @@ class LLM:
             "temperature": self.temperature,
         }
 
-    def chat(self, messages: list[dict]) -> LLMResult:
+    def chat(self, messages: list[dict], temperature: float | None = None) -> LLMResult:
         if self.backend == "mock":
             return self._chat_mock(messages)
         if self.backend == "openai":
-            return self._chat_openai(messages)
+            return self._chat_openai(messages, temperature)
         raise LLMError(f"unknown LLM_BACKEND: {self.backend!r}")
 
     # ---------------------------------------------------------------- openai
 
-    def _chat_openai(self, messages: list[dict]) -> LLMResult:
+    def _chat_openai(self, messages: list[dict], temperature: float | None = None) -> LLMResult:
         import requests  # imported lazily so mock mode needs no dependency
 
         headers = {"Content-Type": "application/json"}
@@ -82,7 +82,7 @@ class LLM:
             "model": self.model,
             "messages": messages,
             "max_tokens": self.max_tokens,
-            "temperature": self.temperature,
+            "temperature": self.temperature if temperature is None else temperature,
             "stream": False,
         }
 

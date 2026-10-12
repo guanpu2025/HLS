@@ -182,9 +182,84 @@ def _repair_hint(kind: str) -> str:
         "header": "失败类别 header：删掉 stdio、cstdlib、cmath 等主机头文件及其调用，只保留题目头文件。",
         "array_type": "失败类别 array_type：头文件里的类型可能是数组。按下标读写元素，不要把整个数组当作整数、结构体或可直接赋值的值。",
         "pragma": "失败类别 pragma：先删除 #pragma HLS，不要把 PIPELINE 放在最外层循环之前。",
-        "functional": "失败类别 functional：保持接口不变，只改计算结果。",
-        "timeout": "失败类别 timeout：综合超时。缩小循环界或减少展开，不要靠加 PIPELINE 来修。",
+        "functional": "失败类别 functional：保持接口不变，按日志里的 inputs、dut、ref 改计算。",
+        "timeout": "失败类别 timeout：综合超时。删掉大数组上的 ARRAY_PARTITION complete 和 UNROLL，不要靠加 PIPELINE 来修。",
     }.get(kind, "失败类别 other：只改日志里第一条错误对应的部分，不要整份重写。")
+
+
+_REPAIR_FUNCTIONAL = """\
+## 上一轮的实现
+
+```cpp
+{{CODE}}
+```
+
+## 小测试台的结果
+
+```
+{{LOG}}
+```
+
+## 本轮要做的事
+
+1. 这里没有 `ERROR:`。上面的 `inputs` 是输入，`dut` 是你的输出，`ref` 是正确输出。
+2. 只改计算，让 `dut` 变成 `ref`。顶层函数签名不要动。
+3. 这一轮的代码必须和上一轮不同，不能把上一轮原样输出。
+
+输出完整文件，只输出一个 ```cpp 代码块，块外不要有任何文字。
+"""
+
+_REPAIR_TIMEOUT = """\
+## 上一轮的实现
+
+```cpp
+{{CODE}}
+```
+
+## 综合结果
+
+```
+{{LOG}}
+```
+
+## 本轮要做的事
+
+1. 综合超时，日志里没有 `ERROR:`。不要把上一轮原样输出。
+2. 删掉大数组上的 `#pragma HLS ARRAY_PARTITION complete` 和 `UNROLL`。
+3. 把变长 `while` 改成有常数上界的 `for`。不要靠加 `PIPELINE` 来修。
+4. 顶层函数签名不要动。
+
+输出完整文件，只输出一个 ```cpp 代码块，块外不要有任何文字。
+"""
+
+
+def _observed_mismatch(log: str) -> tuple[str, str, str] | None:
+    """Return the failing output, the inputs line, and the dut/ref line.
+
+    Used to notice when a repair edited the source but left this result unchanged.
+    """
+    output = ""
+    inputs = ""
+    values = ""
+    for raw in log.splitlines():
+        line = raw.strip()
+        if not output and line.startswith("self-check failed:") and "mismatch" in line:
+            output = line.removeprefix("self-check failed:").replace("mismatch", "").strip()
+        elif not inputs and line.startswith("inputs"):
+            inputs = line
+        elif not values and " dut=" in line and " ref=" in line:
+            values = line
+    if not values:
+        return None
+    return output, inputs, values
+
+
+def _repair_template(kind: str) -> str:
+    if kind == "functional":
+        return _REPAIR_FUNCTIONAL
+    if kind == "timeout":
+        return _REPAIR_TIMEOUT
+    return ""
 
 
 def _round_csynth_budget(remaining: float, rnd: int) -> float:
@@ -254,11 +329,12 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str,
         if last_log:
             # Repair rounds omit the long task statement and clip the previous
             # kernel. des overflowed the 8192-token context when both were sent.
+            template = _repair_template(last_kind) or repair_tpl
             user = (
                 "## 顶层接口（签名不得改动）\n\n```cpp\n" + (interface or "") + "\n```\n\n"
                 + _repair_hint(last_kind) + "\n\n"
-                + repair_tpl.replace("{{LOG}}", _error_excerpt(last_log))
-                            .replace("{{CODE}}", _clip(best, 4000))
+                + template.replace("{{LOG}}", _error_excerpt(last_log))
+                          .replace("{{CODE}}", _clip(best, 4000))
             )
         else:
             user = build_task_block(prompt, interface)
@@ -266,8 +342,9 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str,
         messages.append({"role": "user", "content": user})
 
         t0 = time.time()
+        temperature = 0.0 if rnd == 1 else llm.temperature
         try:
-            result = llm.chat(messages)
+            result = llm.chat(messages, temperature=temperature)
         except LLMError as exc:
             trace.write(tool="llm", round=rnd, rc=1, excerpt=str(exc)[:500])
             break
@@ -275,6 +352,7 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str,
             tool="llm", round=rnd,
             tokens_in=result.tokens_in, tokens_out=result.tokens_out,
             elapsed_s=round(time.time() - t0, 2),
+            temperature=temperature,
         )
 
         code = extract_code(result.text)
@@ -282,6 +360,14 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str,
             trace.write(tool="extract", round=rnd, rc=1,
                         excerpt="no code block in reply")
             last_log = "上一轮回复中没有找到代码块。只输出一个 ```cpp 代码块，不要加解释。"
+            continue
+
+        if best and code.strip() == best.strip():
+            trace.write(tool="agent", event="identical", round=rnd)
+            if output_dir:
+                _save_round(output_dir, rnd, "cpp", code)
+            if "必须修改" not in last_log:
+                last_log += "\n你交回了同一份代码，这一轮必须修改，不能原样输出上一轮的实现。"
             continue
 
         best = code
@@ -314,8 +400,13 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str,
                 trace.write(tool="selfcheck", round=rnd, rc=src,
                             excerpt=slog[:2000], log_path=check_path or None)
                 if src > 0:
+                    observed = _observed_mismatch(slog)
+                    previous = _observed_mismatch(last_log) if last_kind == "functional" else None
                     last_kind = "functional"
-                    last_log = slog
+                    last_log = slog.rstrip()
+                    if observed and observed == previous:
+                        output = observed[0] or "这个输出"
+                        last_log += f"\n上次的修改没有改变 {output}，请改写这个输出的计算。"
                     continue
             trace.write(tool="agent", event="accept", round=rnd)
             return code
