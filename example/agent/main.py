@@ -182,7 +182,7 @@ def _repair_hint(kind: str) -> str:
         "header": "失败类别 header：删掉 stdio、cstdlib、cmath 等主机头文件及其调用，只保留题目头文件。",
         "array_type": "失败类别 array_type：头文件里的类型可能是数组。按下标读写元素，不要把整个数组当作整数、结构体或可直接赋值的值。",
         "pragma": "失败类别 pragma：先删除 #pragma HLS，不要把 PIPELINE 放在最外层循环之前。",
-        "functional": "失败类别 functional：保持接口不变，按日志里的 inputs、dut、ref 改计算。",
+        "functional": "失败类别 functional：保持接口不变，按参考的更新式改计算，让 dut 变成 ref。不要只改 pragma。",
         "timeout": "失败类别 timeout：综合超时。删掉大数组上的 ARRAY_PARTITION complete 和 UNROLL，不要靠加 PIPELINE 来修。",
     }.get(kind, "失败类别 other：只改日志里第一条错误对应的部分，不要整份重写。")
 
@@ -203,8 +203,11 @@ _REPAIR_FUNCTIONAL = """\
 ## 本轮要做的事
 
 1. 这里没有 `ERROR:`。上面的 `inputs` 是输入，`dut` 是你的输出，`ref` 是正确输出。
-2. 只改计算，让 `dut` 变成 `ref`。顶层函数签名不要动。
-3. 这一轮的代码必须和上一轮不同，不能把上一轮原样输出。
+2. 按参考实现的更新式改计算，让 `dut` 变成 `ref`。不要只改被点名的那一个输出，也不要只改 pragma。
+3. `float_n` / `n` 是样本数，均值除以它；协方差除以 `float_n - 1`。原地数组（例如 `data[]`）要按参考那样改写，常见是减去均值。
+4. 矩阵乘的中间量若带 `alpha`，先乘进中间量，后面不要再乘一次。
+5. 若 `char` 序列取值是 0–3，碱基配对是 `(seq[i] + seq[j]) == 3`，不要用 `'A'`/`'T'`/`'G'`/`'C'`。
+6. 顶层函数签名不要动。这一轮的代码必须和上一轮不同，不能把上一轮原样输出。
 
 输出完整文件，只输出一个 ```cpp 代码块，块外不要有任何文字。
 """

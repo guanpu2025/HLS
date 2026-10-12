@@ -7,6 +7,14 @@ skipped. ``ap_fixed`` is compiled with the Vitis headers when ``v++`` is on
 ``PATH``. A host compile that fails in the driver, not in the solution, is
 also skipped rather than failed.
 
+Fill values follow the official polybench-style ranges so the reference can
+finish: ``ap_fixed``/float in ``[0, 1)``, ``alpha``/``beta`` 1.5/1.2,
+``float_n`` the leading array extent, ``char`` in ``0..3``, integers in
+``0..15``. A 2-D integer ``table`` next to a ``char`` sequence is zeroed, like
+the official nussinov testbench. Square real matrices get a diagonal boost so
+``sqrt`` kernels stay defined. The check still compares against the local
+reference, never ``tb_data.txt``.
+
 Enable it in the agent with ``AGENT_SELF_CHECK=1``. The default is off.
 """
 
@@ -313,36 +321,31 @@ def _driver(top: str, ret: str, args: list[Arg], headers: dict[str, str]) -> str
         "}",
         "static uint32_t lcg_state;",
         "static uint32_t lcg() { lcg_state = lcg_state * 1664525u + 1013904223u; return lcg_state; }",
-        "static int pat_i;",
-        "static const uint64_t kPat64[8] = {",
-        "    0ull, 1ull, ~0ull, 1ull << 63,",
-        "    0x7ff8000000000000ull, 0x7ff0000000000001ull,",
-        "    0x7ff0000000000000ull, 0xfff0000000000000ull};",
-        "static const uint32_t kPat32[8] = {",
-        "    0u, 1u, 0xffffffffu, 0x80000000u,",
-        "    0x7fc00000u, 0x7f800001u, 0x7f800000u, 0xff800000u};",
-        "template <typename T>",
-        "static void fill_one(T& slot) {",
-        "    if constexpr (std::is_floating_point<T>::value) {",
-        "        slot = static_cast<T>((static_cast<int>(lcg() % 21) - 10) / 2.0);",
-        "    } else if constexpr (std::is_integral<T>::value && sizeof(T) == 8) {",
-        "        uint64_t bits = kPat64[pat_i % 8];",
-        "        pat_i++;",
-        "        std::memcpy(&slot, &bits, sizeof(bits));",
-        "    } else if constexpr (std::is_integral<T>::value && sizeof(T) == 4) {",
-        "        uint32_t bits = kPat32[pat_i % 8];",
-        "        pat_i++;",
-        "        std::memcpy(&slot, &bits, sizeof(bits));",
-        "    } else if constexpr (sizeof(T) == 1) {",
-        "        slot = static_cast<T>(lcg() % 16);",
-        "    } else {",
-        "        slot = static_cast<T>(static_cast<int>(lcg() % 17) - 8);",
-        "    }",
-        "}",
         "template <typename T, typename = void>",
         "struct has_to_double : std::false_type {};",
         "template <typename T>",
         "struct has_to_double<T, std::void_t<decltype(std::declval<const T&>().to_double())>> : std::true_type {};",
+        "template <typename T>",
+        "static void fill_one(T& slot) {",
+        "    if constexpr (std::is_floating_point<T>::value || has_to_double<T>::value) {",
+        "        slot = static_cast<T>((lcg() % 1000) / 1000.0);",
+        "    } else if constexpr (std::is_integral<T>::value && sizeof(T) == 1) {",
+        "        slot = static_cast<T>(lcg() % 4);",
+        "    } else if constexpr (std::is_integral<T>::value) {",
+        "        slot = static_cast<T>(lcg() % 16);",
+        "    } else {",
+        "        slot = static_cast<T>((lcg() % 1000) / 1000.0);",
+        "    }",
+        "}",
+        "template <typename T>",
+        "static void add_diag(T& slot, int n) {",
+        "    if constexpr (std::is_floating_point<T>::value || has_to_double<T>::value) {",
+        "        slot = slot + static_cast<T>(n);",
+        "    } else {",
+        "        (void)slot;",
+        "        (void)n;",
+        "    }",
+        "}",
         "template <typename T>",
         "static void show_val(const T& v) {",
         "    if constexpr (std::is_floating_point<T>::value) {",
@@ -396,6 +399,36 @@ def _driver(top: str, ret: str, args: list[Arg], headers: dict[str, str]) -> str
         dims = "".join(f"[{d}]" for d in arg.dims)
         return f"{arg.base_type} {arg.name}_{suffix}{dims};"
 
+    def leading_extent() -> str:
+        named = {"data", "a", "a_in", "input"}
+        for arg in args:
+            if arg.dims and arg.name.lower() in named:
+                return f"({arg.dims[0]})"
+        for arg in args:
+            if len(arg.dims) >= 2:
+                return f"({arg.dims[0]})"
+        for arg in args:
+            if arg.dims:
+                return f"({arg.dims[0]})"
+        return "(16)"
+
+    def fill_scalar(arg: Arg, suffix: str) -> str:
+        target = f"{arg.name}_{suffix}"
+        name = arg.name.lower()
+        if name == "alpha":
+            return f"{target} = static_cast<{arg.base_type}>(1.5);"
+        if name == "beta":
+            return f"{target} = static_cast<{arg.base_type}>(1.2);"
+        if name in ("float_n", "n", "fn"):
+            return f"{target} = static_cast<{arg.base_type}>({leading_extent()});"
+        return f"fill_one({target});"
+
+    def _has_char_seq() -> bool:
+        return any(
+            len(a.dims) == 1 and "char" in a.base_type.lower()
+            for a in args
+        )
+
     def fill_stmt(arg: Arg, suffix: str) -> str:
         target = f"{arg.name}_{suffix}"
         dims = index_dims(arg)
@@ -406,8 +439,33 @@ def _driver(top: str, ret: str, args: list[Arg], headers: dict[str, str]) -> str
                 for n, dim in enumerate(dims)
             )
             sub = "".join(f"[{i}]" for i in idx)
+            name = arg.name.lower()
+            zero_table = (
+                len(dims) == 2
+                and "int" in arg.base_type.lower()
+                and (
+                    name in ("table", "dp")
+                    or _has_char_seq()
+                )
+            )
+            if zero_table:
+                return (
+                    f"{loops} {target}{sub} = "
+                    f"static_cast<{arg.base_type}>(0);"
+                )
             return f"{loops} fill_one({target}{sub});"
-        return f"fill_one({target});"
+        return fill_scalar(arg, suffix)
+
+    def boost_diag(arg: Arg, suffix: str) -> str | None:
+        dims = index_dims(arg)
+        if len(dims) != 2 or dims[0].strip() != dims[1].strip():
+            return None
+        target = f"{arg.name}_{suffix}"
+        dim = dims[0]
+        return (
+            f"for (int d = 0; d < ({dim}); ++d) "
+            f"add_diag({target}[d][d], static_cast<int>({dim}));"
+        )
 
     def pass_expr(arg: Arg, suffix: str) -> str:
         if slots(arg) > 1:
@@ -420,17 +478,22 @@ def _driver(top: str, ret: str, args: list[Arg], headers: dict[str, str]) -> str
     fixed = "ap_fixed" in blob or "ap_int" in blob or "ap_ufixed" in blob
     trials = 2 if fixed else 8
     body = ["int main() {", f"    int trials = {trials};", "    for (int trial = 0; trial < trials; ++trial) {",
-            "        lcg_state = 0x12345678u + static_cast<uint32_t>(trial) * 97u;",
-            "        pat_i = trial;"]
+            "        lcg_state = 0x12345678u + static_cast<uint32_t>(trial) * 97u;"]
     for arg in args:
         if arg.const or not arg.dims and not arg.pointer:
             body.append("        " + decl(arg, "in"))
             body.append("        " + fill_stmt(arg, "in"))
+            boost = boost_diag(arg, "in")
+            if boost:
+                body.append("        " + boost)
         else:
             body.append("        " + decl(arg, "dut"))
             body.append("        " + decl(arg, "ref"))
             body.append("        " + decl(arg, "in"))
             body.append("        " + fill_stmt(arg, "dut"))
+            boost = boost_diag(arg, "dut")
+            if boost:
+                body.append("        " + boost)
             body.append(f"        std::memcpy(&{arg.name}_ref, &{arg.name}_dut, sizeof({arg.name}_dut));")
             body.append(f"        std::memcpy(&{arg.name}_in, &{arg.name}_dut, sizeof({arg.name}_dut));")
 
@@ -451,6 +514,20 @@ def _driver(top: str, ret: str, args: list[Arg], headers: dict[str, str]) -> str
                 # bytes are not inputs and must not be printed.
                 lines_out.append(
                     f'{indent}std::printf(" {arg.name}{sub}="); show_val({arg.name}_in{sub});'
+                )
+            elif (
+                failing is not None
+                and sub
+                and len(index_dims(arg)) == 1
+                and failing.dims
+                and len(index_dims(failing)) == 2
+            ):
+                # seq[i], seq[j] next to table[i][j]
+                lines_out.append(
+                    f'{indent}std::printf(" {arg.name}[i0]="); show_val({arg.name}_in[i0]);'
+                )
+                lines_out.append(
+                    f'{indent}std::printf(" {arg.name}[i1]="); show_val({arg.name}_in[i1]);'
                 )
         lines_out.append(f'{indent}std::printf("\\n");')
         lines_out.append(f'{indent}std::printf("{label} dut="); show_val({dut_expr});')
