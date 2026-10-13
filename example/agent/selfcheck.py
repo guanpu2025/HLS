@@ -9,11 +9,14 @@ also skipped rather than failed.
 
 Fill values follow the official polybench-style ranges so the reference can
 finish: ``ap_fixed``/float in ``[0, 1)``, ``alpha``/``beta`` 1.5/1.2,
-``float_n`` the leading array extent, ``char`` in ``0..3``, integers in
-``0..15``. A 2-D integer ``table`` next to a ``char`` sequence is zeroed, like
-the official nussinov testbench. Square real matrices get a diagonal boost so
-``sqrt`` kernels stay defined. The check still compares against the local
-reference, never ``tb_data.txt``.
+``float_n`` the leading array extent, ``char`` in ``0..3``. 32/64-bit integers
+use IEEE bit patterns (0, 1, Inf, NaN, sign bit) so soft-float compares see
+unordered cases. A 2-D integer ``table`` next to a ``char`` sequence is zeroed,
+like the official nussinov testbench. Square real matrices get a diagonal boost
+so ``sqrt`` kernels stay defined. Structs are ``memset``/``memcmp``, not
+constructed from ``double``. A host compile failure is skipped; it is not a
+functional mismatch. The check still compares against the local reference,
+never ``tb_data.txt``.
 
 Enable it in the agent with ``AGENT_SELF_CHECK=1``. The default is off.
 """
@@ -99,13 +102,6 @@ def self_check(
         )
         if compile_log[0] != 0:
             text = compile_log[1]
-            if _driver_fault(text):
-                return -1, (
-                    "self-check skipped: host driver cannot build this interface\n"
-                    + text[-800:]
-                )
-            if "dut.cpp" in text:
-                return 1, "self-check failed: solution did not compile on the host\n" + text[-1500:]
             return -1, "self-check skipped: host compile failed\n" + text[-800:]
         run_rc, run_log = _run([binary], timeout_s=min(timeout_s, 30.0), cwd=task_dir)
         if run_rc == 0:
@@ -151,17 +147,6 @@ def _vitis_include() -> str | None:
     if os.path.isfile(os.path.join(inc, "ap_fixed.h")):
         return inc
     return None
-
-
-def _driver_fault(text: str) -> bool:
-    """True when the first error is in the generated driver, not the solution.
-
-    Struct arguments such as aes256_context fail inside check.cpp while being
-    filled. That is not a wrong kernel, so the agent should skip the check.
-    """
-    check = re.search(r"check\.cpp:\d+:\d+: error:", text)
-    dut = re.search(r"dut\.cpp:\d+:\d+: error:", text)
-    return check is not None and (dut is None or check.start() < dut.start())
 
 
 def parse_signature(interface: str, top: str) -> tuple[str, list[Arg]] | None:
@@ -321,6 +306,14 @@ def _driver(top: str, ret: str, args: list[Arg], headers: dict[str, str]) -> str
         "}",
         "static uint32_t lcg_state;",
         "static uint32_t lcg() { lcg_state = lcg_state * 1664525u + 1013904223u; return lcg_state; }",
+        "static int pat_i;",
+        "static const uint64_t kPat64[8] = {",
+        "    0ull, 1ull, ~0ull, 1ull << 63,",
+        "    0x7ff8000000000000ull, 0x7ff0000000000001ull,",
+        "    0x7ff0000000000000ull, 0xfff0000000000000ull};",
+        "static const uint32_t kPat32[8] = {",
+        "    0u, 1u, 0xffffffffu, 0x80000000u,",
+        "    0x7fc00000u, 0x7f800001u, 0x7f800000u, 0xff800000u};",
         "template <typename T, typename = void>",
         "struct has_to_double : std::false_type {};",
         "template <typename T>",
@@ -331,10 +324,18 @@ def _driver(top: str, ret: str, args: list[Arg], headers: dict[str, str]) -> str
         "        slot = static_cast<T>((lcg() % 1000) / 1000.0);",
         "    } else if constexpr (std::is_integral<T>::value && sizeof(T) == 1) {",
         "        slot = static_cast<T>(lcg() % 4);",
+        "    } else if constexpr (std::is_integral<T>::value && sizeof(T) == 8) {",
+        "        uint64_t bits = kPat64[pat_i % 8];",
+        "        pat_i++;",
+        "        std::memcpy(&slot, &bits, sizeof(bits));",
+        "    } else if constexpr (std::is_integral<T>::value && sizeof(T) == 4) {",
+        "        uint32_t bits = kPat32[pat_i % 8];",
+        "        pat_i++;",
+        "        std::memcpy(&slot, &bits, sizeof(bits));",
         "    } else if constexpr (std::is_integral<T>::value) {",
         "        slot = static_cast<T>(lcg() % 16);",
         "    } else {",
-        "        slot = static_cast<T>((lcg() % 1000) / 1000.0);",
+        "        std::memset(&slot, 0, sizeof(slot));",
         "    }",
         "}",
         "template <typename T>",
@@ -372,10 +373,10 @@ def _driver(top: str, ret: str, args: list[Arg], headers: dict[str, str]) -> str
         "        double d = std::fabs(av - bv);",
         "        double s = std::fabs(av) + std::fabs(bv);",
         "        return d <= 1e-4 || d <= 1e-3 * s;",
-        "    } else if constexpr (std::is_integral<T>::value || std::is_class<T>::value) {",
+        "    } else if constexpr (std::is_integral<T>::value) {",
         "        return a == b;",
         "    } else {",
-        "        return false;",
+        "        return std::memcmp(&a, &b, sizeof(T)) == 0;",
         "    }",
         "}",
     ]
@@ -478,7 +479,8 @@ def _driver(top: str, ret: str, args: list[Arg], headers: dict[str, str]) -> str
     fixed = "ap_fixed" in blob or "ap_int" in blob or "ap_ufixed" in blob
     trials = 2 if fixed else 8
     body = ["int main() {", f"    int trials = {trials};", "    for (int trial = 0; trial < trials; ++trial) {",
-            "        lcg_state = 0x12345678u + static_cast<uint32_t>(trial) * 97u;"]
+            "        lcg_state = 0x12345678u + static_cast<uint32_t>(trial) * 97u;",
+            "        pat_i = trial;"]
     for arg in args:
         if arg.const or not arg.dims and not arg.pointer:
             body.append("        " + decl(arg, "in"))

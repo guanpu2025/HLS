@@ -29,9 +29,9 @@
 
 常用的起手 pragma：
 
-- `#pragma HLS PIPELINE II=1` 放在最内层循环
-- `#pragma HLS ARRAY_PARTITION variable=<arr> complete dim=<n>` 用于小数组
-- `#pragma HLS INLINE off` 用于希望保留层次的子函数
+- `#pragma HLS PIPELINE II=1` 只放在最内层循环
+- `#pragma HLS ARRAY_PARTITION complete` 只用于长度小于约 16 的一维小数组
+- 二维 40×50 以上禁止 `ARRAY_PARTITION complete`，会把综合拖过 300 秒
 
-不确定某个 pragma 是否适用时不要加。多余的 pragma 会引入综合失败，而缺少 pragma
-只是慢一些。
+不确定某个 pragma 是否适用时不要加。多余的 pragma 会引入综合失败或超时，而缺少
+pragma 只是慢一些。功能未过时不要加 partition。

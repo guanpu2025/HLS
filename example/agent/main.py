@@ -1,6 +1,6 @@
 """Minimal HLS agent.
 
-    generate -> csynth -> read the error -> regenerate
+    generate -> selfcheck -> csynth (only if the check passed or skipped) -> repair
 
 Three rounds, then stop. That is the whole control flow, and it is deliberately
 the least interesting part of a competitive submission -- it exists so you have
@@ -42,10 +42,11 @@ ROOT = os.path.dirname(HERE)
 PROMPT_DIR = os.path.join(HERE, "prompts")
 SKILL_DIR = os.path.join(ROOT, "skill")
 
-MAX_ROUNDS = int(os.environ.get("AGENT_MAX_ROUNDS", "3"))
 DEADLINE_S = float(os.environ.get("AGENT_DEADLINE_S", "360"))
-# 综合通过之后才跑。默认关闭，避免改到正在进行的评分。
+# Host g++ vs the local reference. Default off so a plain run.sh stays cheap.
 SELF_CHECK = os.environ.get("AGENT_SELF_CHECK", "0") == "1"
+# Functional rounds are cheap when self-check runs first, so allow more of them.
+MAX_ROUNDS = int(os.environ.get("AGENT_MAX_ROUNDS", "6" if SELF_CHECK else "3"))
 # 为写出结果预留的余量。
 RESERVE_S = float(os.environ.get("AGENT_RESERVE_S", "20"))
 
@@ -158,6 +159,8 @@ _SKILL_FOR_KIND = {
     "array_type": "hls-array-typedef",
     "interface": "hls-interface-contract",
     "header": "hls-no-host-headers",
+    "functional": "hls-functional-selfcheck",
+    "timeout": "hls-csynth-timeout-partition",
 }
 
 
@@ -207,7 +210,7 @@ _REPAIR_FUNCTIONAL = """\
 3. `float_n` / `n` 是样本数，均值除以它；协方差除以 `float_n - 1`。原地数组（例如 `data[]`）要按参考那样改写，常见是减去均值。
 4. 矩阵乘的中间量若带 `alpha`，先乘进中间量，后面不要再乘一次。
 5. 若 `char` 序列取值是 0–3，碱基配对是 `(seq[i] + seq[j]) == 3`，不要用 `'A'`/`'T'`/`'G'`/`'C'`。
-6. 顶层函数签名不要动。这一轮的代码必须和上一轮不同，不能把上一轮原样输出。
+6. 顶层函数签名不要动。这一轮的代码必须和上一轮不同，不能把上一轮原样输出。若提示交回了同一份代码，必须换更新式（换循环边界、换递推、换配对条件），不要只改同一行。
 
 输出完整文件，只输出一个 ```cpp 代码块，块外不要有任何文字。
 """
@@ -307,8 +310,10 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str,
 
     started = time.time()
     best = ""
+    kept = ""
     last_log = ""
     last_kind = ""
+    bump_temp = False
 
     for rnd in range(1, MAX_ROUNDS + 1):
         remaining = DEADLINE_S - (time.time() - started) - RESERVE_S
@@ -345,7 +350,12 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str,
         messages.append({"role": "user", "content": user})
 
         t0 = time.time()
-        temperature = 0.0 if rnd == 1 else llm.temperature
+        if rnd == 1:
+            temperature = 0.0
+        elif bump_temp:
+            temperature = 0.5
+        else:
+            temperature = llm.temperature
         try:
             result = llm.chat(messages, temperature=temperature)
         except LLMError as exc:
@@ -366,24 +376,77 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str,
             continue
 
         if best and code.strip() == best.strip():
-            trace.write(tool="agent", event="identical", round=rnd)
+            bump_temp = True
+            trace.write(tool="agent", event="identical", round=rnd, temperature=0.5)
             if output_dir:
                 _save_round(output_dir, rnd, "cpp", code)
-            if "必须修改" not in last_log:
-                last_log += "\n你交回了同一份代码，这一轮必须修改，不能原样输出上一轮的实现。"
-            continue
-
-        best = code
-        if output_dir:
-            _save_round(output_dir, rnd, "cpp", code)
+            if "换更新式" not in last_log:
+                last_log += (
+                    "\n你交回了同一份代码。必须换一种更新式（换循环边界、换递推、"
+                    "换配对条件），不要只改同一行，不能原样输出上一轮的实现。"
+                )
+            if rnd < MAX_ROUNDS:
+                continue
+            trace.write(
+                tool="agent", event="csynth_anyway", round=rnd,
+                reason="identical_last",
+            )
+        else:
+            bump_temp = False
+            best = code
+            if output_dir:
+                _save_round(output_dir, rnd, "cpp", code)
 
         remaining = DEADLINE_S - (time.time() - started) - RESERVE_S
         if remaining <= 0:
             trace.write(tool="budget", event="stop", round=rnd, reason="deadline")
             break
 
+        func_fail = False
+        if SELF_CHECK and task_dir:
+            src, slog = self_check(
+                task_dir, code, top, interface, headers, timeout_s=remaining,
+            )
+            check_path = (
+                _save_round(output_dir, rnd, "selfcheck.txt", slog) if output_dir else ""
+            )
+            trace.write(
+                tool="selfcheck", round=rnd, rc=src,
+                excerpt=slog[:2000], log_path=check_path or None,
+            )
+            if src > 0:
+                func_fail = True
+                observed = _observed_mismatch(slog)
+                previous = (
+                    _observed_mismatch(last_log) if last_kind == "functional" else None
+                )
+                last_kind = "functional"
+                last_log = slog.rstrip()
+                if observed and observed == previous:
+                    output = observed[0] or "这个输出"
+                    last_log += f"\n上次的修改没有改变 {output}，请改写这个输出的计算。"
+                # Cheap functional rounds skip csynth. The last round always
+                # synthesizes, including when the model repeated the last kernel.
+                if rnd < MAX_ROUNDS:
+                    trace.write(
+                        tool="agent", event="skip_csynth", round=rnd,
+                        reason="functional",
+                    )
+                    continue
+
+        remaining = DEADLINE_S - (time.time() - started) - RESERVE_S
+        if remaining <= 0:
+            trace.write(tool="budget", event="stop", round=rnd, reason="deadline")
+            break
+
+        if func_fail:
+            synth_timeout = _round_csynth_budget(remaining, rnd)
+        else:
+            # Self-check already passed (or was skipped). Spend the remaining
+            # wall clock on csynth, keep ~40s for one pragma repair.
+            synth_timeout = max(1.0, remaining - 40.0)
         rc, log = hls.csynth(
-            code, top, timeout_s=_round_csynth_budget(remaining, rnd), headers=headers,
+            code, top, timeout_s=synth_timeout, headers=headers,
         )
         kind = classify(code, log)
         csynth_path = _save_round(output_dir, rnd, "csynth.txt", log) if output_dir else ""
@@ -391,26 +454,9 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str,
                     excerpt=log[:2000], log_path=csynth_path or None)
 
         if rc == 0:
-            if SELF_CHECK and task_dir:
-                remaining = DEADLINE_S - (time.time() - started) - RESERVE_S
-                if remaining <= 0:
-                    trace.write(tool="budget", event="stop", round=rnd, reason="deadline")
-                    return code
-                src, slog = self_check(
-                    task_dir, code, top, interface, headers, timeout_s=remaining,
-                )
-                check_path = _save_round(output_dir, rnd, "selfcheck.txt", slog) if output_dir else ""
-                trace.write(tool="selfcheck", round=rnd, rc=src,
-                            excerpt=slog[:2000], log_path=check_path or None)
-                if src > 0:
-                    observed = _observed_mismatch(slog)
-                    previous = _observed_mismatch(last_log) if last_kind == "functional" else None
-                    last_kind = "functional"
-                    last_log = slog.rstrip()
-                    if observed and observed == previous:
-                        output = observed[0] or "这个输出"
-                        last_log += f"\n上次的修改没有改变 {output}，请改写这个输出的计算。"
-                    continue
+            kept = code
+            if func_fail:
+                break
             trace.write(tool="agent", event="accept", round=rnd)
             return code
         if rc < 0 and kind != "timeout":
@@ -418,12 +464,15 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str,
             # 本轮时限封顶，后面的轮次还剩时间。
             trace.write(tool="agent", event="stop", round=rnd,
                         reason="no verification available", failure=kind)
-            return code
+            return kept or code
 
         last_kind = kind
         last_log = log
 
-    return best
+    if kept and kept.strip() != (best or "").strip():
+        trace.write(tool="agent", event="revert", reason="keep_last_csynth")
+        return kept
+    return kept or best
 
 
 def main(argv: list[str] | None = None) -> int:
