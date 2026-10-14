@@ -30,9 +30,10 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 
-from .llm import LLM, LLMError, extract_code
+from .llm import LLM, LLMError, extract_code, has_unclosed_fence, _strip_fence_lines
 from .selfcheck import self_check
 from .skills import load_skills, select
 from .tools import HlsToolchain, classify
@@ -49,6 +50,19 @@ SELF_CHECK = os.environ.get("AGENT_SELF_CHECK", "1") == "1"
 MAX_ROUNDS = int(os.environ.get("AGENT_MAX_ROUNDS", "6" if SELF_CHECK else "3"))
 # 为写出结果预留的余量。
 RESERVE_S = float(os.environ.get("AGENT_RESERVE_S", "20"))
+# Conservative decode-rate seed (token/s). Overwritten after the first round
+# from tokens_out/elapsed_s. Do not bake in a GPU-specific measurement.
+TOKEN_RATE_INIT = float(os.environ.get("AGENT_TOKEN_RATE", "20"))
+TOKEN_SAFETY = float(os.environ.get("AGENT_TOKEN_SAFETY", "0.8"))
+MIN_TOKENS = int(os.environ.get("AGENT_MIN_TOKENS", "256"))
+LLM_CTX = int(os.environ.get("LLM_CTX", "16384"))
+MAX_CONTINUES = int(os.environ.get("AGENT_MAX_CONTINUES", "2"))
+CONTINUE_MAX_LINES = 120
+CONTINUE_MAX_CHARS = 4000
+CONTINUE_MAX_LINE = 200
+CONTINUE_HINT = (
+    "上文是被截断的尾部，不是完整文件；从最后一行接着写，不要重复，不要重写整个文件。"
+)
 
 
 class Trace:
@@ -268,6 +282,78 @@ def _repair_template(kind: str) -> str:
     return ""
 
 
+def _round_max_tokens(remaining_s: float, rate: float, cap: int) -> int | None:
+    """Map leftover wall clock to this round's completion budget.
+
+    LLM_MAX_TOKENS is a cap, not a target. None means skip generation.
+    """
+    n = min(int(cap), int(remaining_s * rate * TOKEN_SAFETY))
+    if n < MIN_TOKENS:
+        return None
+    return n
+
+
+def _atomic_write(path: str, text: str) -> None:
+    folder = os.path.dirname(path) or "."
+    os.makedirs(folder, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".sol_", suffix=".tmp", dir=folder)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _write_solution(output_dir: str, text: str) -> None:
+    if not output_dir:
+        return
+    _atomic_write(os.path.join(output_dir, "solution.cpp"), text or "")
+
+
+def _has_top_function(code: str, top: str) -> bool:
+    if not top or not code:
+        return False
+    return re.search(rf"\b{re.escape(top)}\s*\(", code) is not None
+
+
+def _is_fresh_restart(code: str, top: str) -> bool:
+    """Continuation that restarts the file: #include plus the top function."""
+    return bool(code.lstrip().startswith("#include") and _has_top_function(code, top))
+
+
+def _stitch_code(prefix: str, extra: str) -> str:
+    if not extra.strip():
+        return prefix if not prefix or prefix.endswith("\n") else prefix + "\n"
+    if not prefix.strip():
+        return extra if extra.endswith("\n") else extra + "\n"
+    body = prefix.rstrip("\n") + "\n" + extra.lstrip("\n")
+    return body if body.endswith("\n") else body + "\n"
+
+
+def _continue_tail(code: str, max_chars: int = CONTINUE_MAX_CHARS) -> str:
+    """Keep a short, line-bounded suffix of a truncated fragment."""
+    lines = [ln for ln in (code or "").splitlines() if len(ln) <= CONTINUE_MAX_LINE]
+    lines = lines[-CONTINUE_MAX_LINES:]
+    text = "\n".join(lines)
+    while lines and len(text) > max_chars:
+        lines = lines[1:]
+        text = "\n".join(lines)
+    return text
+
+
+def _continue_user(code: str) -> str:
+    overhead = len("\n\n" + CONTINUE_HINT + "\n")
+    tail = _continue_tail(code, max_chars=max(0, CONTINUE_MAX_CHARS - overhead))
+    if tail:
+        return tail.rstrip() + "\n\n" + CONTINUE_HINT + "\n"
+    return CONTINUE_HINT + "\n"
+
+
 def _round_csynth_budget(remaining: float, rnd: int) -> float:
     """Share the time still left with later rounds.
 
@@ -311,9 +397,16 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str,
     started = time.time()
     best = ""
     kept = ""
+    compiled = ""
     last_log = ""
     last_kind = ""
     bump_temp = False
+    token_rate = TOKEN_RATE_INIT
+    pending_continue = False
+    continue_src = ""
+    continues_used = 0
+    longest = ""
+    best_is_trunc = False
 
     for rnd in range(1, MAX_ROUNDS + 1):
         remaining = DEADLINE_S - (time.time() - started) - RESERVE_S
@@ -321,65 +414,160 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str,
             trace.write(tool="budget", event="stop", round=rnd, reason="deadline")
             break
 
+        round_max = _round_max_tokens(remaining, token_rate, llm.max_tokens)
+        if round_max is None:
+            trace.write(
+                tool="budget", event="stop", round=rnd, reason="token_budget",
+                remaining_s=round(remaining, 2), token_rate=token_rate,
+                max_tokens=0,
+            )
+            break
+        trace.write(
+            tool="budget", event="round", round=rnd,
+            max_tokens=round_max, token_rate=token_rate,
+            remaining_s=round(remaining, 2),
+        )
+
         messages = [{"role": "system", "content": system}]
 
-        chosen = _choose_skills(skills, last_kind, prompt, last_log)
-        if chosen:
-            # One system message only. Qwen's template rejects a second one
-            # with "System message must be at the beginning."
-            messages[0]["content"] += (
-                "\n\n以下技能与当前错误相关，按其中的步骤处理：\n\n"
-                + "\n\n".join(s.render() for s in chosen)
+        if pending_continue:
+            overhead = len("\n\n" + CONTINUE_HINT + "\n")
+            tail = _continue_tail(
+                continue_src, max_chars=max(0, CONTINUE_MAX_CHARS - overhead),
             )
-            trace.write(tool="skills", event="inject", round=rnd,
-                        selected=[s.name for s in chosen])
-
-        if last_log:
-            # Repair rounds omit the long task statement and clip the previous
-            # kernel. des overflowed the context when both were sent.
-            template = _repair_template(last_kind) or repair_tpl
-            user = (
-                "## 顶层接口（签名不得改动）\n\n```cpp\n" + (interface or "") + "\n```\n\n"
-                + _repair_hint(last_kind) + "\n\n"
-                + template.replace("{{LOG}}", _error_excerpt(last_log))
-                          .replace("{{CODE}}", _clip(best, 4000))
+            carried_lines = len(tail.splitlines()) if tail else 0
+            trace.write(
+                tool="agent", event="continue", round=rnd,
+                continues=continues_used + 1,
+                carried_chars=len(tail),
+                carried_lines=carried_lines,
             )
+            user = _continue_user(continue_src)
         else:
-            user = build_task_block(prompt, interface)
+            chosen = _choose_skills(skills, last_kind, prompt, last_log)
+            if chosen:
+                # One system message only. Qwen's template rejects a second one
+                # with "System message must be at the beginning."
+                messages[0]["content"] += (
+                    "\n\n以下技能与当前错误相关，按其中的步骤处理：\n\n"
+                    + "\n\n".join(s.render() for s in chosen)
+                )
+                trace.write(tool="skills", event="inject", round=rnd,
+                            selected=[s.name for s in chosen])
+
+            if last_log:
+                # Repair rounds omit the long task statement and clip the previous
+                # kernel. des overflowed the context when both were sent.
+                template = _repair_template(last_kind) or repair_tpl
+                user = (
+                    "## 顶层接口（签名不得改动）\n\n```cpp\n" + (interface or "") + "\n```\n\n"
+                    + _repair_hint(last_kind) + "\n\n"
+                    + template.replace("{{LOG}}", _error_excerpt(last_log))
+                              .replace("{{CODE}}", _clip(best, 4000))
+                )
+            else:
+                user = build_task_block(prompt, interface)
 
         messages.append({"role": "user", "content": user})
 
         t0 = time.time()
-        if rnd == 1:
+        if pending_continue or rnd == 1:
             temperature = 0.0
         elif bump_temp:
             temperature = 0.5
         else:
             temperature = llm.temperature
         try:
-            result = llm.chat(messages, temperature=temperature)
+            result = llm.chat(messages, temperature=temperature, max_tokens=round_max)
         except LLMError as exc:
             trace.write(tool="llm", round=rnd, rc=1, excerpt=str(exc)[:500])
             break
+        elapsed = time.time() - t0
+        elapsed_s = round(elapsed, 2)
+        if rnd == 1 and result.tokens_out > 0 and elapsed > 0:
+            token_rate = result.tokens_out / elapsed
         trace.write(
             tool="llm", round=rnd,
             tokens_in=result.tokens_in, tokens_out=result.tokens_out,
-            elapsed_s=round(time.time() - t0, 2),
+            elapsed_s=elapsed_s,
             temperature=temperature,
+            max_tokens=round_max,
+            token_rate=token_rate,
         )
 
-        code = extract_code(result.text)
-        if not code:
+        unclosed = has_unclosed_fence(result.text)
+        hit_ctx = LLM_CTX > 0 and (result.tokens_in + result.tokens_out) >= LLM_CTX
+        hit_max = round_max > 0 and result.tokens_out >= round_max
+        if unclosed or hit_ctx:
+            trace.write(
+                tool="extract", event="truncated", round=rnd,
+                unclosed_fence=unclosed, hit_ctx=hit_ctx,
+                tokens_in=result.tokens_in, tokens_out=result.tokens_out,
+                ctx_limit=LLM_CTX,
+            )
+
+        piece = extract_code(result.text)
+        if pending_continue and not piece:
+            piece = _strip_fence_lines(result.text)
+        if not piece:
             trace.write(tool="extract", round=rnd, rc=1,
                         excerpt="no code block in reply")
             last_log = "上一轮回复中没有找到代码块。只输出一个 ```cpp 代码块，不要加解释。"
+            pending_continue = False
             continue
+
+        from_continue = pending_continue
+        if pending_continue:
+            continues_used += 1
+            if _is_fresh_restart(piece, top):
+                code = piece if piece.endswith("\n") else piece + "\n"
+            else:
+                code = _stitch_code(continue_src, piece)
+        else:
+            code = piece if piece.endswith("\n") else piece + "\n"
+
+        is_trunc = unclosed or hit_max
+
+        if is_trunc:
+            if len(code) > len(longest):
+                longest = code
+            if output_dir:
+                _save_round(output_dir, rnd, "cpp", code)
+            if compiled:
+                # Continue-stitch (or its truncated prefix) must not clobber a
+                # host-compilable candidate. rc=1 counts; selfcheck was not run.
+                trace.write(tool="agent", event="keep_compiled", round=rnd)
+                _write_solution(output_dir, kept or compiled)
+            elif (not best) or (best_is_trunc and len(code) >= len(best)):
+                best = code
+                best_is_trunc = True
+                _write_solution(output_dir, kept or best)
+            if continues_used >= MAX_CONTINUES:
+                trace.write(
+                    tool="agent", event="stop", round=rnd,
+                    reason="max_continues", continues=continues_used,
+                )
+                break
+            pending_continue = True
+            continue_src = code
+            continue
+
+        pending_continue = False
+        continue_src = ""
+        best_is_trunc = False
+        if len(code) > len(longest):
+            longest = code
+
+        already_checked = False
+        src = -1
+        slog = ""
 
         if best and code.strip() == best.strip():
             bump_temp = True
             trace.write(tool="agent", event="identical", round=rnd, temperature=0.5)
             if output_dir:
                 _save_round(output_dir, rnd, "cpp", code)
+            _write_solution(output_dir, kept or best)
             if "换更新式" not in last_log:
                 last_log += (
                     "\n你交回了同一份代码。必须换一种更新式（换循环边界、换递推、"
@@ -391,11 +579,49 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str,
                 tool="agent", event="csynth_anyway", round=rnd,
                 reason="identical_last",
             )
+        elif from_continue:
+            bump_temp = False
+            if output_dir:
+                _save_round(output_dir, rnd, "cpp", code)
+            remaining = DEADLINE_S - (time.time() - started) - RESERVE_S
+            accept = False
+            if remaining > 0 and SELF_CHECK and task_dir:
+                src, slog = self_check(
+                    task_dir, code, top, interface, headers, timeout_s=remaining,
+                )
+                already_checked = True
+                check_path = (
+                    _save_round(output_dir, rnd, "selfcheck.txt", slog)
+                    if output_dir else ""
+                )
+                trace.write(
+                    tool="selfcheck", round=rnd, rc=src,
+                    excerpt=slog[:2000], log_path=check_path or None,
+                )
+                if src in (0, 1):
+                    compiled = code
+                    accept = True
+            if accept:
+                best = code
+                _write_solution(output_dir, kept or best)
+            elif compiled:
+                trace.write(tool="agent", event="keep_compiled", round=rnd)
+                _write_solution(output_dir, kept or compiled)
+                if remaining <= 0:
+                    trace.write(
+                        tool="budget", event="stop", round=rnd, reason="deadline",
+                    )
+                    break
+                continue
+            else:
+                best = code
+                _write_solution(output_dir, kept or best)
         else:
             bump_temp = False
             best = code
             if output_dir:
                 _save_round(output_dir, rnd, "cpp", code)
+            _write_solution(output_dir, kept or best)
 
         remaining = DEADLINE_S - (time.time() - started) - RESERVE_S
         if remaining <= 0:
@@ -403,36 +629,43 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str,
             break
 
         func_fail = False
-        if SELF_CHECK and task_dir:
-            src, slog = self_check(
+        if already_checked:
+            check_src, check_slog = src, slog
+        elif SELF_CHECK and task_dir:
+            check_src, check_slog = self_check(
                 task_dir, code, top, interface, headers, timeout_s=remaining,
             )
             check_path = (
-                _save_round(output_dir, rnd, "selfcheck.txt", slog) if output_dir else ""
+                _save_round(output_dir, rnd, "selfcheck.txt", check_slog)
+                if output_dir else ""
             )
             trace.write(
-                tool="selfcheck", round=rnd, rc=src,
-                excerpt=slog[:2000], log_path=check_path or None,
+                tool="selfcheck", round=rnd, rc=check_src,
+                excerpt=check_slog[:2000], log_path=check_path or None,
             )
-            if src > 0:
-                func_fail = True
-                observed = _observed_mismatch(slog)
-                previous = (
-                    _observed_mismatch(last_log) if last_kind == "functional" else None
+            if check_src in (0, 1):
+                compiled = code
+        else:
+            check_src, check_slog = None, ""
+        if check_src is not None and check_src > 0:
+            func_fail = True
+            observed = _observed_mismatch(check_slog)
+            previous = (
+                _observed_mismatch(last_log) if last_kind == "functional" else None
+            )
+            last_kind = "functional"
+            last_log = check_slog.rstrip()
+            if observed and observed == previous:
+                output = observed[0] or "这个输出"
+                last_log += f"\n上次的修改没有改变 {output}，请改写这个输出的计算。"
+            # Cheap functional rounds skip csynth. The last round always
+            # synthesizes, including when the model repeated the last kernel.
+            if rnd < MAX_ROUNDS:
+                trace.write(
+                    tool="agent", event="skip_csynth", round=rnd,
+                    reason="functional",
                 )
-                last_kind = "functional"
-                last_log = slog.rstrip()
-                if observed and observed == previous:
-                    output = observed[0] or "这个输出"
-                    last_log += f"\n上次的修改没有改变 {output}，请改写这个输出的计算。"
-                # Cheap functional rounds skip csynth. The last round always
-                # synthesizes, including when the model repeated the last kernel.
-                if rnd < MAX_ROUNDS:
-                    trace.write(
-                        tool="agent", event="skip_csynth", round=rnd,
-                        reason="functional",
-                    )
-                    continue
+                continue
 
         remaining = DEADLINE_S - (time.time() - started) - RESERVE_S
         if remaining <= 0:
@@ -455,6 +688,7 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str,
 
         if rc == 0:
             kept = code
+            _write_solution(output_dir, kept)
             if func_fail:
                 break
             trace.write(tool="agent", event="accept", round=rnd)
@@ -471,8 +705,13 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str,
 
     if kept and kept.strip() != (best or "").strip():
         trace.write(tool="agent", event="revert", reason="keep_last_csynth")
+        _write_solution(output_dir, kept)
         return kept
-    return kept or best
+    handoff = kept or best
+    if best_is_trunc and len(longest) > len(handoff or ""):
+        handoff = longest
+    _write_solution(output_dir, handoff)
+    return handoff
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -500,8 +739,10 @@ def main(argv: list[str] | None = None) -> int:
         trace.write(tool="agent", event="error", excerpt=f"{type(exc).__name__}: {exc}"[:500])
         print(f"agent: {type(exc).__name__}: {exc}", file=sys.stderr)
     finally:
-        with open(sol_path, "w", encoding="utf-8") as fh:
-            fh.write(code or "")
+        if code:
+            _atomic_write(sol_path, code)
+        elif not os.path.isfile(sol_path) or os.path.getsize(sol_path) == 0:
+            _atomic_write(sol_path, "")
         trace.write(tool="agent", event="done", bytes=len(code or ""))
         trace.close()
 
