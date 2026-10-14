@@ -42,9 +42,9 @@ ROOT = os.path.dirname(HERE)
 PROMPT_DIR = os.path.join(HERE, "prompts")
 SKILL_DIR = os.path.join(ROOT, "skill")
 
-DEADLINE_S = float(os.environ.get("AGENT_DEADLINE_S", "360"))
-# Host g++ vs the local reference. Default off so a plain run.sh stays cheap.
-SELF_CHECK = os.environ.get("AGENT_SELF_CHECK", "0") == "1"
+DEADLINE_S = float(os.environ.get("AGENT_DEADLINE_S", "950"))
+# Host g++ vs the local reference. On for the submitted run.sh.
+SELF_CHECK = os.environ.get("AGENT_SELF_CHECK", "1") == "1"
 # Functional rounds are cheap when self-check runs first, so allow more of them.
 MAX_ROUNDS = int(os.environ.get("AGENT_MAX_ROUNDS", "6" if SELF_CHECK else "3"))
 # 为写出结果预留的余量。
@@ -154,7 +154,7 @@ def _clip(text: str, limit: int) -> str:
 
 # Short skills injected only for the matching failure class. The long
 # hls-top-interface-contract document stays on disk; sending it on a repair
-# round overflows the 8192-token context.
+# round overflows the 16384-token context.
 _SKILL_FOR_KIND = {
     "array_type": "hls-array-typedef",
     "interface": "hls-interface-contract",
@@ -336,7 +336,7 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str,
 
         if last_log:
             # Repair rounds omit the long task statement and clip the previous
-            # kernel. des overflowed the 8192-token context when both were sent.
+            # kernel. des overflowed the context when both were sent.
             template = _repair_template(last_kind) or repair_tpl
             user = (
                 "## 顶层接口（签名不得改动）\n\n```cpp\n" + (interface or "") + "\n```\n\n"

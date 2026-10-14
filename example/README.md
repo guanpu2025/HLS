@@ -110,20 +110,21 @@ export LLM_MODEL=Qwen3-8B
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `LLM_BACKEND` | `mock` | 填 `mock` 或 `openai` |
-| `LLM_BASE_URL` | 无 | 模型服务地址，用 `openai` 后端时必填 |
-| `LLM_API_KEY` | 空 | 本地 vLLM 可填任意值 |
-| `LLM_MODEL` | `mock-model` | 模型名 |
-| `AGENT_MAX_ROUNDS` | `3` | 最多重试几轮 |
+| `LLM_BACKEND` | `openai` | 填 `mock` 或 `openai`。提交默认 `openai` |
+| `LLM_BASE_URL` | `http://127.0.0.1:8000/v1` | 模型服务地址 |
+| `LLM_API_KEY` | `dummy` | 本地 llama.cpp 可填任意值 |
+| `LLM_MODEL` | `Coder390-Q6_K` | 须与 `MODEL.md` 服务别名一致 |
+| `AGENT_MAX_ROUNDS` | `6` | 最多重试几轮 |
+| `AGENT_SELF_CHECK` | `1` | 为 1 时先跑 host g++ selfcheck |
 
 其余用于微调行为，一般不必改动：
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `LLM_MAX_TOKENS` | `4096` | 单次输出上限，须与 `MODEL.md` 一致 |
+| `LLM_MAX_TOKENS` | `8192` | 单次输出上限，须与 `MODEL.md` 及 `baseline.py` 一致 |
 | `LLM_TEMPERATURE` | `0.2` | 采样温度 |
-| `LLM_TIMEOUT_S` | `180` | 单次模型调用超时 |
-| `AGENT_DEADLINE_S` | `360` | 单题时间预算，评测时由投题参数覆盖 |
+| `LLM_TIMEOUT_S` | `900` | 单次模型调用超时 |
+| `AGENT_DEADLINE_S` | `950` | 单题时间预算，评测时可由投题参数覆盖 |
 | `AGENT_RESERVE_S` | `20` | 留给写出结果的余量 |
 | `AGENT_TMP` | `/tmp` | 临时目录，须为本地盘 |
 | `VITIS_HLS_CMD` | 自动探测 | 指定 `v++` 的路径 |

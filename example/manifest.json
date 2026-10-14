@@ -2,23 +2,27 @@
   "schema_version": 1,
   "track": "hls",
   "model": {
-    "name": "Qwen/Qwen3-8B",
-    "source": "https://huggingface.co/Qwen/Qwen3-8B",
-    "revision": "REPLACE_WITH_COMMIT_SHA",
-    "quantization": "none",
-    "measured_vram_gb": 0.0,
+    "name": "Arkha7/Qwen3.8-27B-Coder390-EfficientThink-Opus5.5-GPT6Astra-Grok4.7-DSV4Pro-K3-SFT-RLOO-MTP-DFlash2",
+    "source": "https://huggingface.co/Arkha7/Qwen3.8-27B-Coder390-EfficientThink-Opus5.5-GPT6Astra-Grok4.7-DSV4Pro-K3-SFT-RLOO-MTP-DFlash2",
+    "revision": "d602255311fbdf0852161dc33ccfbecb80e7c7ce",
+    "quantization": "GGUF-Q6_K",
+    "weight_file": "GGUF/Qwen3.8-27B-Coder390-EfficientThink-Q6_K-MTP.gguf",
+    "weight_sha256": "302597c53d1b00f7230b53a8a050831390a4371e92a80c1ac644fa920af76ab1",
+    "measured_vram_gb": 21.1,
     "finetuned": false,
-    "finetune_weights_url": null
+    "finetune_note": "Upstream is a published SFT+RLOO derivative; this team did not train. Open weights URL is `source`.",
+    "finetune_weights_url": null,
+    "served_name": "Coder390-Q6_K"
   },
   "context": {
-    "max_model_len": 32768,
-    "max_output_tokens": 4096,
+    "max_model_len": 16384,
+    "max_output_tokens": 8192,
     "rope_scaling": null
   },
   "serving": {
-    "backend": "vllm",
-    "version": "REPLACE",
-    "start_command": "./serve/vllm.sh",
+    "backend": "llama.cpp",
+    "version": "0.6.0-dev 781dbc5",
+    "start_command": "./serve/llama.sh",
     "port": 8000
   },
   "endpoints": {
@@ -27,11 +31,19 @@
     "http_port": 7860
   },
   "agent": {
-    "max_rounds": 3,
+    "max_rounds": 6,
     "tools": [
+      "selfcheck",
       "csynth"
     ],
     "skills": [
+      "hls-array-typedef",
+      "hls-csynth-timeout-partition",
+      "hls-functional-selfcheck",
+      "hls-ieee-softfloat-nan",
+      "hls-interface-contract",
+      "hls-no-complete-partition-large",
+      "hls-no-host-headers",
       "hls-top-interface-contract"
     ]
   }

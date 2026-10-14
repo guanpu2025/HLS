@@ -42,13 +42,13 @@ class LLMResult:
 
 class LLM:
     def __init__(self) -> None:
-        self.backend = os.environ.get("LLM_BACKEND", "mock").strip().lower()
-        self.model = os.environ.get("LLM_MODEL", "mock-model")
-        self.base_url = os.environ.get("LLM_BASE_URL", "").rstrip("/")
-        self.api_key = os.environ.get("LLM_API_KEY", "")
-        self.max_tokens = int(os.environ.get("LLM_MAX_TOKENS", "4096"))
+        self.backend = os.environ.get("LLM_BACKEND", "openai").strip().lower()
+        self.model = os.environ.get("LLM_MODEL", "Coder390-Q6_K")
+        self.base_url = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:8000/v1").rstrip("/")
+        self.api_key = os.environ.get("LLM_API_KEY", "dummy")
+        self.max_tokens = int(os.environ.get("LLM_MAX_TOKENS", "8192"))
         self.temperature = float(os.environ.get("LLM_TEMPERATURE", "0.2"))
-        self.timeout_s = float(os.environ.get("LLM_TIMEOUT_S", "180"))
+        self.timeout_s = float(os.environ.get("LLM_TIMEOUT_S", "900"))
 
         if self.backend == "openai" and not self.base_url:
             raise LLMError("LLM_BACKEND=openai requires LLM_BASE_URL")

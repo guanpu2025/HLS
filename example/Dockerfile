@@ -27,7 +27,7 @@ COPY skill/  skill/
 COPY serve/  serve/
 COPY model/  model/
 COPY run.sh run_baseline.sh manifest.json REPORT.md ./
-RUN chmod +x run.sh run_baseline.sh serve/vllm.sh
+RUN chmod +x run.sh run_baseline.sh serve/vllm.sh serve/llama.sh
 
 # Model weights. Copy them in, or bind-mount at run time -- but they must be on
 # local disk before the network goes away. `huggingface-cli download` at startup
@@ -36,9 +36,14 @@ RUN chmod +x run.sh run_baseline.sh serve/vllm.sh
 # COPY models/ /models/
 
 ENV LLM_BACKEND=openai \
-    LLM_BASE_URL=http://localhost:8000/v1 \
-    LLM_MODEL=Qwen3-8B \
+    LLM_BASE_URL=http://127.0.0.1:8000/v1 \
+    LLM_MODEL=Coder390-Q6_K \
     LLM_API_KEY=dummy \
+    LLM_MAX_TOKENS=8192 \
+    LLM_TIMEOUT_S=900 \
+    AGENT_SELF_CHECK=1 \
+    AGENT_MAX_ROUNDS=6 \
+    AGENT_DEADLINE_S=950 \
     AGENT_TMP=/tmp \
     HLS_PART=xczu3eg-sbva484-1-e \
     HLS_PERIOD_NS=5

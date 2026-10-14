@@ -1,0 +1,87 @@
+你是竞赛策略顾问。下面是 AMD FPGA HLS Agent 赛道的真实自测数据。请根据这些事实给建议，不要编造没写出来的分数或官方规则。
+
+## 赛制（本地复现，125 题，类 HLS-Eval）
+
+评分结构（满分 100）：
+- 能力 Ability：30 × pass@1（用的是 agent 的 pass@1）
+- 增益 Gain：40 × log(gain) / log(cap)，gain = 同模型 agent_pass@1 / baseline_pass@1；cap 目前占位 2.5，以赛前公告为准。gain≤1 则增益分为 0。
+- 代价 Cost：10，墙钟，相对官方公布的基准机时，本地无法自评。
+- 质量 Quality：20，含 skills、traces、失败分析，含人工评定，本地无法自评。
+
+pass@1 = 各题等级系数的平均：
+- L1 能解析 0.1
+- L2 能编译 0.2
+- L3 csim 过 0.8
+- L4 csynth 过 1.0
+
+Baseline 定义（必须同模型）：temperature=0，一发，无工具，MAX_TOKENS=8192。
+Agent 允许多轮、self-check、skills、csynth。增益必须是同一模型、同一轮配对，不能拿后来改过的 agent 去比很早的 baseline。
+
+硬约束：
+- 不准改 hls-judge、不准对答案、不准放宽容差、不准硬编码。
+- 约 25 道 polybench fixed（ap_fixed）官方 golden / tb_data 与本地参考不一致，这是精度墙，不打算追这 25 题的 L4。
+- 本地 Vitis HLS 2025.2；LLM 是云上 V100S 32GB 的 llama.cpp Q6_K GGUF。
+
+## 当前 Agent harness
+
+流程：生成 → g++ selfcheck → 通过或 skip 才 csynth。
+AGENT_SELF_CHECK=1，最多 6 轮；保留最后一次 csynth 成功的核；代码完全相同则温度 0.5；最后一轮强制 csynth。
+有若干 AMD 格式 skills（functional-selfcheck、ieee-softfloat-nan、不要大数组 complete partition 等）。
+keep-last 只保留 agent 自己 csynth 过的核，不会回退到本轮 baseline 解。
+selfcheck 失败时中间轮跳过 csynth。
+实际跑 Coder390 时 AGENT_DEADLINE_S=360（env.sh 覆盖了脚本里的 950）。Coder390 偏啰嗦，单轮可生成 5k+ token、耗时 200s+。
+
+## 两套模型的正式配对（都是 125 题）
+
+模型 A：Qwen3.8-27B-Q6_K（较早 harness 的完整配对）
+- baseline pass@1 = 0.6048；档位 L4=61, L3=5, L2=47, L1=12
+- agent    pass@1 = 0.6088；档位 L4=58, L3=8, L2=58, L1=1
+- 能力 18.26 / 30
+- 增益 1.0066× → 增益分 0.29 / 40
+- 能力+增益 = 18.55
+
+模型 B：Coder390（Arkha7/Qwen3.8-27B-Coder390-… Q6_K-MTP，当前 harness 的完整配对）
+- baseline pass@1 = 0.574（score.py 排除了 2 道判定超时>1800s，按 123 题计：fixed_floyd-warshall、optical_flow；这两题 baseline 记为 tool_error。若把超时当 L0 计入 125 题，baseline 为 0.5648）
+- agent    pass@1 = 0.6248；档位 L4=67, L2=53, L1=5（125 题全计入；上述两题 agent 都是 L4）
+- 能力 18.74 / 30
+- 增益 0.6248/0.574 = 1.0885× → 增益分 3.7 / 40
+- 能力+增益 = 22.45
+- 同轮 agent 相对 baseline：18 题升高、7 题回退
+
+模型 A 在后期改 harness 后的 overlay（多轮 verify 拼出来的 agent 上限，不是合法配对，不能提交）：
+- agent pass@1 ≈ 0.6904；L4=76, L3=1, L2=47, L1=1
+- 若拿这个 agent 去比模型 A 的旧 baseline 0.6048：增益约 1.14×，增益分约 5.8，能力 20.7，合计约 26.5。这只是上限估计。
+
+## 关键对比事实
+
+1. 一发（baseline）：A 明显强于 B（0.605 vs 0.574）。A 有 14 题 baseline 更高，B 只有 6 题更高。
+2. 当前 harness 下的完整配对：B 的可提交分更高（22.4 vs 18.6），主要来自增益；B 的 baseline 更弱，agent 修回来，增益好看。
+3. 同样 harness 的“旧模型 overlay”比 B 的 agent 多 13 题更好，B 只多赢 parallel_merge_sort（overlay L3 → B 的 L4）。
+4. B 的 agent 相对自己的 baseline 回退了 7 题（这些题一发其实会对或更好）：
+   - overlapping L4→L1
+   - signaling_nan / flowgnn_input_stationary / correlation / gramschmidt / pixel_in_triangle L4→L2
+   - stencil2d L2→L1
+   overlapping 第一轮生成 228s 截断，综合语法错，第二轮撞 360s 时限。
+   correlation 六轮 selfcheck 都失败所以跳过 csynth，最后一轮才综合且官方 csim 不过；该题 baseline 是 L4。
+5. 若 agent 提交 max(agent, 本轮 baseline)（先一发、只升不降，竞赛里可视为合法 agent 策略）：
+   B 的 pass@1 大约 0.665，能力约 20.0，增益约 1.18×，增益分约 7，合计约 27。
+   这是“别把已经写对的弄丢”，不是新智力。
+6. 再往 overlay 的 0.69 靠，还差 nussinov / lu / symm / md_knn 等，这些是 A 写对、B 没写对的题，改循环救不回来。
+7. 两边都过不了的墙：约 25 道 fixed_* 停在 L2；des 常为 L1；softfloat（dfadd/dfmul/dfsin 等）、fft_strided、nw、若干 machsuite 停在 L2。
+8. 不打算追 25 道 fixed golden，也不改 judge。
+
+## 已有判断（供你反驳或补全）
+
+- 能力很难从 ~19 冲到 25+，除非动 fixed 墙或硬核语义。
+- 对模型 A，后期 harness 已经贴着这堵墙，再改收益小。
+- 对模型 B，harness 还没吃满，甚至在伤它（360s 时限、selfcheck 失败跳过 csynth、不回退到 baseline）。
+- B 不是更强的 HLS 模型，更像“一发差一点、修一修还行”；A 更像“一发就对”。
+
+## 请回答
+
+1. 若目标是提交分最大化（能力+增益，cap=2.5），下一步应该：提交 B 的现有配对 / 用当前 harness 给 A 重跑一轮合法配对 / 先改 B 的 harness 再重跑 B？给出排序和理由。
+2. 只改 harness、不换模型、不碰 fixed golden，B 的能力/增益现实上限大概在哪？哪些改动是高 ROI（请按工作量排序）。
+3. “先跑 baseline、agent 只升不降”是否有赛制风险？
+4. 有没有我漏掉的、能同时抬能力和增益的办法？不要建议改 judge 或对答案。
+
+补充：请以这段自测数据为准，不要用网上别的 HLS-Eval 分数替换。
