@@ -397,6 +397,7 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str,
     started = time.time()
     best = ""
     kept = ""
+    kept_rank = 0
     compiled = ""
     last_log = ""
     last_kind = ""
@@ -658,9 +659,9 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str,
             if observed and observed == previous:
                 output = observed[0] or "这个输出"
                 last_log += f"\n上次的修改没有改变 {output}，请改写这个输出的计算。"
-            # Cheap functional rounds skip csynth. The last round always
-            # synthesizes, including when the model repeated the last kernel.
-            if rnd < MAX_ROUNDS:
+            # Later functional rounds skip csynth until the last one.
+            # Round 1 always synthesizes so a rank-2 kernel exists.
+            if rnd > 1 and rnd < MAX_ROUNDS:
                 trace.write(
                     tool="agent", event="skip_csynth", round=rnd,
                     reason="functional",
@@ -687,12 +688,24 @@ def solve_agent(llm: LLM, trace: Trace, prompt: str, interface: str, top: str,
                     excerpt=log[:2000], log_path=csynth_path or None)
 
         if rc == 0:
-            kept = code
-            _write_solution(output_dir, kept)
-            if func_fail:
-                break
-            trace.write(tool="agent", event="accept", round=rnd)
-            return code
+            new_rank = 3 if check_src == 0 else 2
+            if new_rank > kept_rank:
+                kept = code
+                kept_rank = new_rank
+                _write_solution(output_dir, kept)
+            else:
+                trace.write(
+                    tool="agent", event="keep_better", round=rnd,
+                    old_rank=kept_rank, new_rank=new_rank,
+                )
+                if kept:
+                    _write_solution(output_dir, kept)
+            if new_rank == 3:
+                trace.write(tool="agent", event="accept", round=rnd)
+                return kept
+            if rnd < MAX_ROUNDS:
+                continue
+            break
         if rc < 0 and kind != "timeout":
             # 工具链不可用，无法验证，不再继续重试。综合超时仍重试，前提是上面把
             # 本轮时限封顶，后面的轮次还剩时间。

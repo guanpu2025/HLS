@@ -62,16 +62,18 @@ class LLM:
             "temperature": self.temperature,
         }
 
-    def chat(self, messages: list[dict], temperature: float | None = None) -> LLMResult:
+    def chat(self, messages: list[dict], temperature: float | None = None,
+             max_tokens: int | None = None) -> LLMResult:
         if self.backend == "mock":
             return self._chat_mock(messages)
         if self.backend == "openai":
-            return self._chat_openai(messages, temperature)
+            return self._chat_openai(messages, temperature, max_tokens)
         raise LLMError(f"unknown LLM_BACKEND: {self.backend!r}")
 
     # ---------------------------------------------------------------- openai
 
-    def _chat_openai(self, messages: list[dict], temperature: float | None = None) -> LLMResult:
+    def _chat_openai(self, messages: list[dict], temperature: float | None = None,
+                     max_tokens: int | None = None) -> LLMResult:
         import requests  # imported lazily so mock mode needs no dependency
 
         headers = {"Content-Type": "application/json"}
@@ -81,7 +83,7 @@ class LLM:
         payload = {
             "model": self.model,
             "messages": messages,
-            "max_tokens": self.max_tokens,
+            "max_tokens": self.max_tokens if max_tokens is None else int(max_tokens),
             "temperature": self.temperature if temperature is None else temperature,
             "stream": False,
         }
@@ -166,6 +168,36 @@ def _guessed_header(text: str) -> str:
     return "kernel.h"
 
 
+_FENCE_LABEL = r"cpp|c\+\+|c|hls|"
+_FENCE_OPEN_RE = re.compile(rf"```(?:{_FENCE_LABEL})\s*\n", re.IGNORECASE)
+_FENCE_PAIRED_RE = re.compile(
+    rf"```(?:{_FENCE_LABEL})\s*\n(.*?)```", re.DOTALL | re.IGNORECASE,
+)
+
+
+def _is_fence_line(line: str) -> bool:
+    return line.lstrip().startswith("```")
+
+
+def _strip_fence_lines(text: str) -> str:
+    """Drop markdown fence marker lines. Never return a ```-prefixed line."""
+    lines = text.splitlines()
+    while lines and _is_fence_line(lines[0]):
+        lines.pop(0)
+    while lines and _is_fence_line(lines[-1]):
+        lines.pop()
+    lines = [ln for ln in lines if not _is_fence_line(ln)]
+    body = "\n".join(lines).strip()
+    return (body + "\n") if body else ""
+
+
+def has_unclosed_fence(text: str) -> bool:
+    """True when an opening ```cpp / ```c++ / ```hls / ``` fence has no closer."""
+    rest = _FENCE_PAIRED_RE.sub("", text)
+    opened = _FENCE_OPEN_RE.search(rest)
+    return bool(opened and rest[opened.end():].strip())
+
+
 def extract_code(text: str) -> str:
     """Pull the C++ out of a model reply.
 
@@ -173,13 +205,17 @@ def extract_code(text: str) -> str:
     sometimes emit prose after the closing fence, or no fence at all. Handle the
     three cases in decreasing order of confidence.
     """
-    blocks = re.findall(r"```(?:cpp|c\+\+|c|hls|)\s*\n(.*?)```", text, re.DOTALL)
+    blocks = _FENCE_PAIRED_RE.findall(text)
     if blocks:
         # 取最长的代码块：模型常先回显接口。
-        return max(blocks, key=len).strip() + "\n"
+        return _strip_fence_lines(max(blocks, key=len))
 
-    # 无代码围栏时，若整体形似代码则全部取用。
+    opened = _FENCE_OPEN_RE.search(text)
+    if opened and text[opened.end():].strip():
+        return _strip_fence_lines(text[opened.end():])
+
+    # 无代码围栏时，若整体形似代码则全部取用。剥掉首尾围栏行。
     if "#include" in text or "void " in text or "#pragma" in text:
-        return text.strip() + "\n"
+        return _strip_fence_lines(text)
 
     return ""

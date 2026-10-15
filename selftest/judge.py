@@ -23,6 +23,7 @@ import argparse
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -110,9 +111,7 @@ def judge(task_dir: str, solution_path: str, outdir: str | None = None,
     ]
 
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=timeout_s, errors="replace")
-        raw = (proc.stdout or "") + (proc.stderr or "")
+        raw = _run_hls_judge(cmd, timeout_s, work)
     except subprocess.TimeoutExpired:
         result["tool_error"] = f"判定超时（>{timeout_s:.0f}s）"
         result["elapsed_s"] = round(time.time() - t0, 1)
@@ -134,6 +133,85 @@ def judge(task_dir: str, solution_path: str, outdir: str | None = None,
     result["elapsed_s"] = round(time.time() - t0, 1)
     _cleanup(work, result)
     return result
+
+
+def _run_hls_judge(cmd: list[str], timeout_s: float, workdir: str = "") -> str:
+    """Run hls-judge in a new session so a timeout can kill Vitis grandchildren."""
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+        text=True,
+        errors="replace",
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_s)
+        return (stdout or "") + (stderr or "")
+    except subprocess.TimeoutExpired:
+        _kill_process_group(proc, workdir)
+        raise
+
+
+def _kill_by_workdir(workdir: str) -> None:
+    """vitis-run setsid's itself, so killpg(hls-judge) misses the compiler tree."""
+    needle = os.path.abspath(workdir) if workdir else ""
+    if len(needle) < 12:
+        return
+    mypid = os.getpid()
+    pgids: set[int] = set()
+    pids: list[int] = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if pid == mypid:
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                cmd = fh.read().replace(b"\0", b" ").decode("utf-8", "replace")
+        except OSError:
+            continue
+        if needle not in cmd:
+            continue
+        pids.append(pid)
+        try:
+            pgids.add(os.getpgid(pid))
+        except OSError:
+            pass
+    for pgid in pgids:
+        if pgid <= 1:
+            continue
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
+def _kill_process_group(proc: subprocess.Popen, workdir: str = "") -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    _kill_by_workdir(workdir)
+    time.sleep(0.2)
+    _kill_by_workdir(workdir)
+    try:
+        proc.communicate(timeout=5)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        pass
 
 
 def _translate(verdict: dict, result: dict) -> None:
